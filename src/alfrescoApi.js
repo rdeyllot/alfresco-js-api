@@ -8,6 +8,7 @@ var AlfrescoContent = require('./alfrescoContent');
 var AlfrescoNode = require('./alfrescoNode');
 var AlfrescoUpload = require('./alfrescoUpload');
 var AlfrescoWebScriptApi = require('./alfrescoWebScript');
+var GenericRestApi = require('./genericRestApi');
 var Emitter = require('event-emitter');
 var EcmAuth = require('./ecmAuth');
 var BpmAuth = require('./bpmAuth');
@@ -83,6 +84,7 @@ class AlfrescoApi {
         this.content = new AlfrescoContent(this.ecmAuth);
         this.upload = new AlfrescoUpload();
         this.webScript = new AlfrescoWebScriptApi();
+        this.activiti.restClient = new GenericRestApi(this.bpmAuth.getClient());
     }
 
     _instantiateObjects(module, moduleCopy) {
