@@ -19,6 +19,7 @@ class AlfrescoApi {
      *      config = {
      *        hostEcm:       // hostEcm Your share server IP or DNS name
      *        hostBpm: // hostBpm Your activiti server IP or DNS name
+     *        hostOauth2: // hostOauth2 Your authentication Oauth2 server IP or DNS name
      *        contextRoot: // contextRoot default value alfresco
      *        provider:   // ECM BPM ALL, default ECM
      *        ticketEcm:     // Ticket if you already have a ECM ticket you can pass only the ticket and skip the login, in this case you don't need username and password
@@ -35,6 +36,7 @@ class AlfrescoApi {
         this.config = {
             hostEcm: config.hostEcm || 'http://127.0.0.1:8080',
             hostBpm: config.hostBpm || 'http://127.0.0.1:9999',
+            hostOauth2: config.hostOauth2 || 'http://127.0.0.1:9191',
             contextRoot: config.contextRoot || 'alfresco',
             provider: config.provider || 'ECM',
             ticketEcm: config.ticketEcm,
