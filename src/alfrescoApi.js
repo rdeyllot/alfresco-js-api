@@ -10,6 +10,7 @@ var AlfrescoWebScriptApi = require('./alfrescoWebScript');
 var Emitter = require('event-emitter');
 var EcmAuth = require('./ecmAuth');
 var BpmAuth = require('./bpmAuth');
+var Oauth2Auth = require('./oauth2Auth');
 var _ = require('lodash');
 
 class AlfrescoApi {
@@ -21,7 +22,7 @@ class AlfrescoApi {
      *        hostBpm: // hostBpm Your activiti server IP or DNS name
      *        hostOauth2: // hostOauth2 Your authentication Oauth2 server IP or DNS name
      *        contextRoot: // contextRoot default value alfresco
-     *        provider:   // ECM BPM ALL, default ECM
+     *        provider:   // ECM BPM ALL OAUTH, default ECM
      *        ticketEcm:     // Ticket if you already have a ECM ticket you can pass only the ticket and skip the login, in this case you don't need username and password
      *        ticketBpm:     // Ticket if you already have a BPM ticket you can pass only the ticket and skip the login, in this case you don't need username and password
      *        disableCsrf:   // To disable CSRF Token to be submitted. Only for Activiti call, by default is false.
@@ -46,6 +47,7 @@ class AlfrescoApi {
 
         this.bpmAuth = new BpmAuth(this.config);
         this.ecmAuth = new EcmAuth(this.config);
+        this.oauth2Auth = new Oauth2Auth(this.config);
 
         this.initObjects();
 
@@ -150,6 +152,16 @@ class AlfrescoApi {
             });
 
             return bpmEcmPromise;
+        } else if (this._isOauthConfiguration()) {
+            var oauth2AuthPromise = this.oauth2Auth.login(username, password);
+
+            oauth2AuthPromise.then((data)=> {
+                var legacyToken = JSON.parse(data.legacyToken);
+                this.config.ticketEcm = legacyToken.LegacyToken.legacyTokenEcm;
+                this.config.ticketBpm = legacyToken.LegacyToken.legacyTokenBpm;
+            });
+
+            return oauth2AuthPromise;
         }
     }
 
@@ -296,6 +308,10 @@ class AlfrescoApi {
 
     _isEcmConfiguration() {
         return this.config.provider && this.config.provider.toUpperCase() === 'ECM';
+    }
+
+    _isOauthConfiguration() {
+        return this.config.provider && this.config.provider.toUpperCase() === 'OAUTH';
     }
 
     _isEcmBpmConfiguration() {

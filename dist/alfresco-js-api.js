@@ -56216,6 +56216,7 @@ var AlfrescoWebScriptApi = require('./alfrescoWebScript');
 var Emitter = require('event-emitter');
 var EcmAuth = require('./ecmAuth');
 var BpmAuth = require('./bpmAuth');
+var Oauth2Auth = require('./oauth2Auth');
 var _ = require('lodash');
 
 var AlfrescoApi = function () {
@@ -56225,8 +56226,9 @@ var AlfrescoApi = function () {
      *      config = {
      *        hostEcm:       // hostEcm Your share server IP or DNS name
      *        hostBpm: // hostBpm Your activiti server IP or DNS name
+     *        hostOauth2: // hostOauth2 Your authentication Oauth2 server IP or DNS name
      *        contextRoot: // contextRoot default value alfresco
-     *        provider:   // ECM BPM ALL, default ECM
+     *        provider:   // ECM BPM ALL OAUTH, default ECM
      *        ticketEcm:     // Ticket if you already have a ECM ticket you can pass only the ticket and skip the login, in this case you don't need username and password
      *        ticketBpm:     // Ticket if you already have a BPM ticket you can pass only the ticket and skip the login, in this case you don't need username and password
      *        disableCsrf:   // To disable CSRF Token to be submitted. Only for Activiti call, by default is false.
@@ -56242,6 +56244,7 @@ var AlfrescoApi = function () {
         this.config = {
             hostEcm: config.hostEcm || 'http://127.0.0.1:8080',
             hostBpm: config.hostBpm || 'http://127.0.0.1:9999',
+            hostOauth2: config.hostOauth2 || 'http://127.0.0.1:9191',
             contextRoot: config.contextRoot || 'alfresco',
             provider: config.provider || 'ECM',
             ticketEcm: config.ticketEcm,
@@ -56251,6 +56254,7 @@ var AlfrescoApi = function () {
 
         this.bpmAuth = new BpmAuth(this.config);
         this.ecmAuth = new EcmAuth(this.config);
+        this.oauth2Auth = new Oauth2Auth(this.config);
 
         this.initObjects();
 
@@ -56371,6 +56375,16 @@ var AlfrescoApi = function () {
                 });
 
                 return bpmEcmPromise;
+            } else if (this._isOauthConfiguration()) {
+                var oauth2AuthPromise = this.oauth2Auth.login(username, password);
+
+                oauth2AuthPromise.then(function (data) {
+                    var legacyToken = JSON.parse(data.legacyToken);
+                    _this2.config.ticketEcm = legacyToken.LegacyToken.legacyTokenEcm;
+                    _this2.config.ticketBpm = legacyToken.LegacyToken.legacyTokenBpm;
+                });
+
+                return oauth2AuthPromise;
             }
         }
 
@@ -56546,6 +56560,11 @@ var AlfrescoApi = function () {
             return this.config.provider && this.config.provider.toUpperCase() === 'ECM';
         }
     }, {
+        key: '_isOauthConfiguration',
+        value: function _isOauthConfiguration() {
+            return this.config.provider && this.config.provider.toUpperCase() === 'OAUTH';
+        }
+    }, {
         key: '_isEcmBpmConfiguration',
         value: function _isEcmBpmConfiguration() {
             return this.config.provider && this.config.provider.toUpperCase() === 'ALL';
@@ -56562,7 +56581,7 @@ module.exports.Activiti = AlfrescoActivitiApi;
 module.exports.Core = AlfrescoCoreRestApi;
 module.exports.Auth = AlfrescoAuthRestApi;
 
-},{"./alfresco-activiti-rest-api/src/index":69,"./alfresco-auth-rest-api/src/index":153,"./alfresco-core-rest-api/src/index.js":176,"./alfrescoContent":288,"./alfrescoNode":289,"./alfrescoUpload":290,"./alfrescoWebScript":291,"./bpmAuth":292,"./ecmAuth":293,"event-emitter":21,"lodash":23}],287:[function(require,module,exports){
+},{"./alfresco-activiti-rest-api/src/index":69,"./alfresco-auth-rest-api/src/index":153,"./alfresco-core-rest-api/src/index.js":176,"./alfrescoContent":288,"./alfrescoNode":289,"./alfrescoUpload":290,"./alfrescoWebScript":291,"./bpmAuth":292,"./ecmAuth":293,"./oauth2Auth":294,"event-emitter":21,"lodash":23}],287:[function(require,module,exports){
 'use strict';
 
 var _createClass = function () { function defineProperties(target, props) { for (var i = 0; i < props.length; i++) { var descriptor = props[i]; descriptor.enumerable = descriptor.enumerable || false; descriptor.configurable = true; if ("value" in descriptor) descriptor.writable = true; Object.defineProperty(target, descriptor.key, descriptor); } } return function (Constructor, protoProps, staticProps) { if (protoProps) defineProperties(Constructor.prototype, protoProps); if (staticProps) defineProperties(Constructor, staticProps); return Constructor; }; }();
@@ -57604,5 +57623,99 @@ var EcmAuth = function (_AlfrescoApiClient) {
 Emitter(EcmAuth.prototype); // jshint ignore:line
 module.exports = EcmAuth;
 
-},{"./alfresco-auth-rest-api/src/index":153,"./alfrescoApiClient":287,"event-emitter":21}]},{},[1])(1)
+},{"./alfresco-auth-rest-api/src/index":153,"./alfrescoApiClient":287,"event-emitter":21}],294:[function(require,module,exports){
+(function (Buffer){
+'use strict';
+
+var _createClass = function () { function defineProperties(target, props) { for (var i = 0; i < props.length; i++) { var descriptor = props[i]; descriptor.enumerable = descriptor.enumerable || false; descriptor.configurable = true; if ("value" in descriptor) descriptor.writable = true; Object.defineProperty(target, descriptor.key, descriptor); } } return function (Constructor, protoProps, staticProps) { if (protoProps) defineProperties(Constructor.prototype, protoProps); if (staticProps) defineProperties(Constructor, staticProps); return Constructor; }; }();
+
+function _classCallCheck(instance, Constructor) { if (!(instance instanceof Constructor)) { throw new TypeError("Cannot call a class as a function"); } }
+
+function _possibleConstructorReturn(self, call) { if (!self) { throw new ReferenceError("this hasn't been initialised - super() hasn't been called"); } return call && (typeof call === "object" || typeof call === "function") ? call : self; }
+
+function _inherits(subClass, superClass) { if (typeof superClass !== "function" && superClass !== null) { throw new TypeError("Super expression must either be null or a function, not " + typeof superClass); } subClass.prototype = Object.create(superClass && superClass.prototype, { constructor: { value: subClass, enumerable: false, writable: true, configurable: true } }); if (superClass) Object.setPrototypeOf ? Object.setPrototypeOf(subClass, superClass) : subClass.__proto__ = superClass; }
+
+var AlfrescoApiClient = require('./alfrescoApiClient');
+var Emitter = require('event-emitter');
+
+var oauth2Auth = function (_AlfrescoApiClient) {
+    _inherits(oauth2Auth, _AlfrescoApiClient);
+
+    /**
+     * @param {Object} config
+     */
+    function oauth2Auth(config) {
+        _classCallCheck(this, oauth2Auth);
+
+        var _this = _possibleConstructorReturn(this, (oauth2Auth.__proto__ || Object.getPrototypeOf(oauth2Auth)).call(this));
+
+        _this.config = config;
+        _this.basePath = _this.config.hostOauth2; //Auth Call
+        Emitter.call(_this);
+        return _this;
+    }
+
+    /**
+     * login Alfresco API
+     * @param  {String} username:   // Username to login
+     * @param  {String} password:   // Password to login
+     *
+     * @returns {Promise} A promise that returns {new authentication ticket} if resolved and {error} if rejected.
+     * */
+
+
+    _createClass(oauth2Auth, [{
+        key: 'login',
+        value: function login(username, password) {
+            var _this2 = this;
+
+            var postBody = {},
+                pathParams = {},
+                queryParams = {},
+                formParams = {};
+
+            var auth = 'Basic ' + new Buffer('alfrescoapp' + ':' + 'secret').toString('base64');
+
+            var headerParams = {
+                'Content-Type': 'application/x-www-form-urlencoded',
+                'Cache-Control': 'no-cache',
+                'Authorization': auth
+            };
+
+            queryParams = {
+                username: username,
+                password: password,
+                grant_type: 'password'
+            };
+
+            var authNames = [];
+            var contentTypes = ['application/x-www-form-urlencoded'];
+            var accepts = ['application/json'];
+
+            this.promise = new Promise(function (resolve, reject) {
+                _this2.callApi('/oauth/token', 'POST', pathParams, queryParams, headerParams, formParams, postBody, authNames, contentTypes, accepts, {}).then(function (data) {
+                    resolve(data);
+                }, function (error) {
+                    if (error.error.status === 401) {
+                        _this2.promise.emit('unauthorized');
+                    }
+                    _this2.promise.emit('error');
+                    reject(error.error);
+                });
+            });
+
+            Emitter(this.promise); // jshint ignore:line
+
+            return this.promise;
+        }
+    }]);
+
+    return oauth2Auth;
+}(AlfrescoApiClient);
+
+Emitter(oauth2Auth.prototype); // jshint ignore:line
+module.exports = oauth2Auth;
+
+}).call(this,require("buffer").Buffer)
+},{"./alfrescoApiClient":287,"buffer":4,"event-emitter":21}]},{},[1])(1)
 });

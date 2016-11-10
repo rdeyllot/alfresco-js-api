@@ -13,7 +13,7 @@ describe('Ecm Auth test', function () {
 
     describe('With Authentication', function () {
 
-        it.only('login should return the Token if is ok', function (done) {
+        it('login should return the Token if is ok', function (done) {
 
             //this.oauth2Mock.rec();
 
