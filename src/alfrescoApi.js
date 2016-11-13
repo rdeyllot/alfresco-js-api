@@ -37,7 +37,7 @@ class AlfrescoApi {
         this.config = {
             hostEcm: config.hostEcm || 'http://127.0.0.1:8080',
             hostBpm: config.hostBpm || 'http://127.0.0.1:9999',
-            hostOauth2: config.hostOauth2 || 'http://127.0.0.1:9191',
+            hostOauth2: config.hostOauth2 || 'http://localhost:8888/sso',
             contextRoot: config.contextRoot || 'alfresco',
             provider: config.provider || 'ECM',
             ticketEcm: config.ticketEcm,
@@ -156,9 +156,8 @@ class AlfrescoApi {
             var oauth2AuthPromise = this.oauth2Auth.login(username, password);
 
             oauth2AuthPromise.then((data)=> {
-                var legacyToken = JSON.parse(data.legacyToken);
-                this.config.ticketEcm = legacyToken.LegacyToken.legacyTokenEcm;
-                this.config.ticketBpm = legacyToken.LegacyToken.legacyTokenBpm;
+                this.config.ticketEcm = data.legacyTokenEcm;
+                this.config.ticketBpm = data.legacyTokenBpm;
             });
 
             return oauth2AuthPromise;
