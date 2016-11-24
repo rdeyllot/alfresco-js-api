@@ -9,6 +9,7 @@ declare namespace AlfrescoApi {
         Activiti: Activiti;
         Auth: Auth;
         Core: Core;
+        Workflow: Workflow;
         Mock: Mock;
 
         bpmAuth: BpmAuthApi;
@@ -16,6 +17,7 @@ declare namespace AlfrescoApi {
 
         activiti: Activiti;
         core: Core;
+        workflow: Workflow;
 
         search: any;
         nodes: NodesApi;
@@ -584,6 +586,49 @@ declare namespace AlfrescoApi {
         TagPaging: any;
         TagPagingList: any;
         UserInfo: any;
+    }
+
+    export interface Workflow {
+        deploymentsApi: any;
+        processDefinitionsApi: any;
+        processesApi: any;
+        tasksApi: any;
+
+        /*Models*/
+        CandidatePaging: any;
+        CandidatePagingList: any;
+        Deployment: any;
+        DeploymentEntry: any;
+        DeploymentPaging: any;
+        DeploymentPagingList: any;
+        Error: any;
+        ErrorError: any;
+        Pagination: any;
+        Process: any;
+        ProcessBody: any;
+        ProcessDefinition: any;
+        ProcessDefinitionEntry: any;
+        ProcessDefinitionPaging: any;
+        ProcessDefinitionPagingList: any;
+        ProcessDefinitionStartFormPaging: any;
+        ProcessDefinitionStartFormPagingList: any;
+        ProcessEntry: any;
+        ProcessItem: any;
+        ProcessItemBody: any;
+        ProcessItemEntry: any;
+        ProcessItemsPaging: any;
+        ProcessItemsPagingList: any;
+        Task: any;
+        TaskBody: any;
+        TaskEntry: any;
+        TaskFormsPaging: any;
+        TaskFormsPagingList: any;
+        Variable: any;
+        Variable1: any;
+        VariableBody: any;
+        VariableEntry: any;
+        VariablePaging: any;
+        VariablePagingList: any;
     }
 
     export interface AlfrescoApiConfig {

@@ -5,9 +5,10 @@ var AlfrescoApi = require('./src/alfrescoApi.js');
 
 module.exports = AlfrescoApi;
 
-},{"./src/alfrescoApi.js":286}],2:[function(require,module,exports){
+},{"./src/alfrescoApi.js":329}],2:[function(require,module,exports){
 'use strict'
 
+exports.byteLength = byteLength
 exports.toByteArray = toByteArray
 exports.fromByteArray = fromByteArray
 
@@ -15,23 +16,17 @@ var lookup = []
 var revLookup = []
 var Arr = typeof Uint8Array !== 'undefined' ? Uint8Array : Array
 
-function init () {
-  var code = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
-  for (var i = 0, len = code.length; i < len; ++i) {
-    lookup[i] = code[i]
-    revLookup[code.charCodeAt(i)] = i
-  }
-
-  revLookup['-'.charCodeAt(0)] = 62
-  revLookup['_'.charCodeAt(0)] = 63
+var code = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
+for (var i = 0, len = code.length; i < len; ++i) {
+  lookup[i] = code[i]
+  revLookup[code.charCodeAt(i)] = i
 }
 
-init()
+revLookup['-'.charCodeAt(0)] = 62
+revLookup['_'.charCodeAt(0)] = 63
 
-function toByteArray (b64) {
-  var i, j, l, tmp, placeHolders, arr
+function placeHoldersCount (b64) {
   var len = b64.length
-
   if (len % 4 > 0) {
     throw new Error('Invalid string. Length must be a multiple of 4')
   }
@@ -41,9 +36,19 @@ function toByteArray (b64) {
   // represent one byte
   // if there is only one, then the three characters before it represent 2 bytes
   // this is just a cheap hack to not do indexOf twice
-  placeHolders = b64[len - 2] === '=' ? 2 : b64[len - 1] === '=' ? 1 : 0
+  return b64[len - 2] === '=' ? 2 : b64[len - 1] === '=' ? 1 : 0
+}
 
+function byteLength (b64) {
   // base64 is 4/3 + up to two characters of the original data
+  return b64.length * 3 / 4 - placeHoldersCount(b64)
+}
+
+function toByteArray (b64) {
+  var i, j, l, tmp, placeHolders, arr
+  var len = b64.length
+  placeHolders = placeHoldersCount(b64)
+
   arr = new Arr(len * 3 / 4 - placeHolders)
 
   // if there are placeholders, only get up to the last complete 4 chars
@@ -287,6 +292,8 @@ if (Buffer.TYPED_ARRAY_SUPPORT) {
 function assertSize (size) {
   if (typeof size !== 'number') {
     throw new TypeError('"size" argument must be a number')
+  } else if (size < 0) {
+    throw new RangeError('"size" argument must not be negative')
   }
 }
 
@@ -350,12 +357,20 @@ function fromString (that, string, encoding) {
   var length = byteLength(string, encoding) | 0
   that = createBuffer(that, length)
 
-  that.write(string, encoding)
+  var actual = that.write(string, encoding)
+
+  if (actual !== length) {
+    // Writing a hex string, for example, that contains invalid characters will
+    // cause everything after the first invalid character to be ignored. (e.g.
+    // 'abxxcd' will be treated as 'ab')
+    that = that.slice(0, actual)
+  }
+
   return that
 }
 
 function fromArrayLike (that, array) {
-  var length = checked(array.length) | 0
+  var length = array.length < 0 ? 0 : checked(array.length) | 0
   that = createBuffer(that, length)
   for (var i = 0; i < length; i += 1) {
     that[i] = array[i] & 255
@@ -374,7 +389,9 @@ function fromArrayBuffer (that, array, byteOffset, length) {
     throw new RangeError('\'length\' is out of bounds')
   }
 
-  if (length === undefined) {
+  if (byteOffset === undefined && length === undefined) {
+    array = new Uint8Array(array)
+  } else if (length === undefined) {
     array = new Uint8Array(array, byteOffset)
   } else {
     array = new Uint8Array(array, byteOffset, length)
@@ -422,7 +439,7 @@ function fromObject (that, obj) {
 }
 
 function checked (length) {
-  // Note: cannot use `length < kMaxLength` here because that fails when
+  // Note: cannot use `length < kMaxLength()` here because that fails when
   // length is NaN (which is otherwise coerced to zero.)
   if (length >= kMaxLength()) {
     throw new RangeError('Attempt to allocate Buffer larger than maximum ' +
@@ -471,9 +488,9 @@ Buffer.isEncoding = function isEncoding (encoding) {
     case 'utf8':
     case 'utf-8':
     case 'ascii':
+    case 'latin1':
     case 'binary':
     case 'base64':
-    case 'raw':
     case 'ucs2':
     case 'ucs-2':
     case 'utf16le':
@@ -534,9 +551,8 @@ function byteLength (string, encoding) {
   for (;;) {
     switch (encoding) {
       case 'ascii':
+      case 'latin1':
       case 'binary':
-      case 'raw':
-      case 'raws':
         return len
       case 'utf8':
       case 'utf-8':
@@ -609,8 +625,9 @@ function slowToString (encoding, start, end) {
       case 'ascii':
         return asciiSlice(this, start, end)
 
+      case 'latin1':
       case 'binary':
-        return binarySlice(this, start, end)
+        return latin1Slice(this, start, end)
 
       case 'base64':
         return base64Slice(this, start, end)
@@ -658,6 +675,20 @@ Buffer.prototype.swap32 = function swap32 () {
   for (var i = 0; i < len; i += 4) {
     swap(this, i, i + 3)
     swap(this, i + 1, i + 2)
+  }
+  return this
+}
+
+Buffer.prototype.swap64 = function swap64 () {
+  var len = this.length
+  if (len % 8 !== 0) {
+    throw new RangeError('Buffer size must be a multiple of 64-bits')
+  }
+  for (var i = 0; i < len; i += 8) {
+    swap(this, i, i + 7)
+    swap(this, i + 1, i + 6)
+    swap(this, i + 2, i + 5)
+    swap(this, i + 3, i + 4)
   }
   return this
 }
@@ -744,7 +775,73 @@ Buffer.prototype.compare = function compare (target, start, end, thisStart, this
   return 0
 }
 
-function arrayIndexOf (arr, val, byteOffset, encoding) {
+// Finds either the first index of `val` in `buffer` at offset >= `byteOffset`,
+// OR the last index of `val` in `buffer` at offset <= `byteOffset`.
+//
+// Arguments:
+// - buffer - a Buffer to search
+// - val - a string, Buffer, or number
+// - byteOffset - an index into `buffer`; will be clamped to an int32
+// - encoding - an optional encoding, relevant is val is a string
+// - dir - true for indexOf, false for lastIndexOf
+function bidirectionalIndexOf (buffer, val, byteOffset, encoding, dir) {
+  // Empty buffer means no match
+  if (buffer.length === 0) return -1
+
+  // Normalize byteOffset
+  if (typeof byteOffset === 'string') {
+    encoding = byteOffset
+    byteOffset = 0
+  } else if (byteOffset > 0x7fffffff) {
+    byteOffset = 0x7fffffff
+  } else if (byteOffset < -0x80000000) {
+    byteOffset = -0x80000000
+  }
+  byteOffset = +byteOffset  // Coerce to Number.
+  if (isNaN(byteOffset)) {
+    // byteOffset: it it's undefined, null, NaN, "foo", etc, search whole buffer
+    byteOffset = dir ? 0 : (buffer.length - 1)
+  }
+
+  // Normalize byteOffset: negative offsets start from the end of the buffer
+  if (byteOffset < 0) byteOffset = buffer.length + byteOffset
+  if (byteOffset >= buffer.length) {
+    if (dir) return -1
+    else byteOffset = buffer.length - 1
+  } else if (byteOffset < 0) {
+    if (dir) byteOffset = 0
+    else return -1
+  }
+
+  // Normalize val
+  if (typeof val === 'string') {
+    val = Buffer.from(val, encoding)
+  }
+
+  // Finally, search either indexOf (if dir is true) or lastIndexOf
+  if (Buffer.isBuffer(val)) {
+    // Special case: looking for empty string/buffer always fails
+    if (val.length === 0) {
+      return -1
+    }
+    return arrayIndexOf(buffer, val, byteOffset, encoding, dir)
+  } else if (typeof val === 'number') {
+    val = val & 0xFF // Search for a byte value [0-255]
+    if (Buffer.TYPED_ARRAY_SUPPORT &&
+        typeof Uint8Array.prototype.indexOf === 'function') {
+      if (dir) {
+        return Uint8Array.prototype.indexOf.call(buffer, val, byteOffset)
+      } else {
+        return Uint8Array.prototype.lastIndexOf.call(buffer, val, byteOffset)
+      }
+    }
+    return arrayIndexOf(buffer, [ val ], byteOffset, encoding, dir)
+  }
+
+  throw new TypeError('val must be string, number or Buffer')
+}
+
+function arrayIndexOf (arr, val, byteOffset, encoding, dir) {
   var indexSize = 1
   var arrLength = arr.length
   var valLength = val.length
@@ -771,60 +868,45 @@ function arrayIndexOf (arr, val, byteOffset, encoding) {
     }
   }
 
-  var foundIndex = -1
-  for (var i = byteOffset; i < arrLength; ++i) {
-    if (read(arr, i) === read(val, foundIndex === -1 ? 0 : i - foundIndex)) {
-      if (foundIndex === -1) foundIndex = i
-      if (i - foundIndex + 1 === valLength) return foundIndex * indexSize
-    } else {
-      if (foundIndex !== -1) i -= i - foundIndex
-      foundIndex = -1
+  var i
+  if (dir) {
+    var foundIndex = -1
+    for (i = byteOffset; i < arrLength; i++) {
+      if (read(arr, i) === read(val, foundIndex === -1 ? 0 : i - foundIndex)) {
+        if (foundIndex === -1) foundIndex = i
+        if (i - foundIndex + 1 === valLength) return foundIndex * indexSize
+      } else {
+        if (foundIndex !== -1) i -= i - foundIndex
+        foundIndex = -1
+      }
+    }
+  } else {
+    if (byteOffset + valLength > arrLength) byteOffset = arrLength - valLength
+    for (i = byteOffset; i >= 0; i--) {
+      var found = true
+      for (var j = 0; j < valLength; j++) {
+        if (read(arr, i + j) !== read(val, j)) {
+          found = false
+          break
+        }
+      }
+      if (found) return i
     }
   }
 
   return -1
 }
 
-Buffer.prototype.indexOf = function indexOf (val, byteOffset, encoding) {
-  if (typeof byteOffset === 'string') {
-    encoding = byteOffset
-    byteOffset = 0
-  } else if (byteOffset > 0x7fffffff) {
-    byteOffset = 0x7fffffff
-  } else if (byteOffset < -0x80000000) {
-    byteOffset = -0x80000000
-  }
-  byteOffset >>= 0
-
-  if (this.length === 0) return -1
-  if (byteOffset >= this.length) return -1
-
-  // Negative offsets start from the end of the buffer
-  if (byteOffset < 0) byteOffset = Math.max(this.length + byteOffset, 0)
-
-  if (typeof val === 'string') {
-    val = Buffer.from(val, encoding)
-  }
-
-  if (Buffer.isBuffer(val)) {
-    // special case: looking for empty string/buffer always fails
-    if (val.length === 0) {
-      return -1
-    }
-    return arrayIndexOf(this, val, byteOffset, encoding)
-  }
-  if (typeof val === 'number') {
-    if (Buffer.TYPED_ARRAY_SUPPORT && Uint8Array.prototype.indexOf === 'function') {
-      return Uint8Array.prototype.indexOf.call(this, val, byteOffset)
-    }
-    return arrayIndexOf(this, [ val ], byteOffset, encoding)
-  }
-
-  throw new TypeError('val must be string, number or Buffer')
-}
-
 Buffer.prototype.includes = function includes (val, byteOffset, encoding) {
   return this.indexOf(val, byteOffset, encoding) !== -1
+}
+
+Buffer.prototype.indexOf = function indexOf (val, byteOffset, encoding) {
+  return bidirectionalIndexOf(this, val, byteOffset, encoding, true)
+}
+
+Buffer.prototype.lastIndexOf = function lastIndexOf (val, byteOffset, encoding) {
+  return bidirectionalIndexOf(this, val, byteOffset, encoding, false)
 }
 
 function hexWrite (buf, string, offset, length) {
@@ -841,7 +923,7 @@ function hexWrite (buf, string, offset, length) {
 
   // must be an even number of digits
   var strLen = string.length
-  if (strLen % 2 !== 0) throw new Error('Invalid hex string')
+  if (strLen % 2 !== 0) throw new TypeError('Invalid hex string')
 
   if (length > strLen / 2) {
     length = strLen / 2
@@ -862,7 +944,7 @@ function asciiWrite (buf, string, offset, length) {
   return blitBuffer(asciiToBytes(string), buf, offset, length)
 }
 
-function binaryWrite (buf, string, offset, length) {
+function latin1Write (buf, string, offset, length) {
   return asciiWrite(buf, string, offset, length)
 }
 
@@ -924,8 +1006,9 @@ Buffer.prototype.write = function write (string, offset, length, encoding) {
       case 'ascii':
         return asciiWrite(this, string, offset, length)
 
+      case 'latin1':
       case 'binary':
-        return binaryWrite(this, string, offset, length)
+        return latin1Write(this, string, offset, length)
 
       case 'base64':
         // Warning: maxLength not taken into account in base64Write
@@ -1066,7 +1149,7 @@ function asciiSlice (buf, start, end) {
   return ret
 }
 
-function binarySlice (buf, start, end) {
+function latin1Slice (buf, start, end) {
   var ret = ''
   end = Math.min(buf.length, end)
 
@@ -2430,8 +2513,8 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
 (function (global){
 /**
  * @license
- * lodash <https://lodash.com/>
- * Copyright jQuery Foundation and other contributors <https://jquery.org/>
+ * Lodash <https://lodash.com/>
+ * Copyright JS Foundation and other contributors <https://js.foundation/>
  * Released under MIT license <https://lodash.com/license>
  * Based on Underscore.js 1.8.3 <http://underscorejs.org/LICENSE>
  * Copyright Jeremy Ashkenas, DocumentCloud and Investigative Reporters & Editors
@@ -2442,42 +2525,51 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
   var undefined;
 
   /** Used as the semantic version number. */
-  var VERSION = '4.13.1';
+  var VERSION = '4.17.2';
 
   /** Used as the size to enable large array optimizations. */
   var LARGE_ARRAY_SIZE = 200;
 
-  /** Used as the `TypeError` message for "Functions" methods. */
-  var FUNC_ERROR_TEXT = 'Expected a function';
+  /** Error message constants. */
+  var CORE_ERROR_TEXT = 'Unsupported core-js use. Try https://npms.io/search?q=ponyfill.',
+      FUNC_ERROR_TEXT = 'Expected a function';
 
   /** Used to stand-in for `undefined` hash values. */
   var HASH_UNDEFINED = '__lodash_hash_undefined__';
 
+  /** Used as the maximum memoize cache size. */
+  var MAX_MEMOIZE_SIZE = 500;
+
   /** Used as the internal argument placeholder. */
   var PLACEHOLDER = '__lodash_placeholder__';
 
-  /** Used to compose bitmasks for wrapper metadata. */
-  var BIND_FLAG = 1,
-      BIND_KEY_FLAG = 2,
-      CURRY_BOUND_FLAG = 4,
-      CURRY_FLAG = 8,
-      CURRY_RIGHT_FLAG = 16,
-      PARTIAL_FLAG = 32,
-      PARTIAL_RIGHT_FLAG = 64,
-      ARY_FLAG = 128,
-      REARG_FLAG = 256,
-      FLIP_FLAG = 512;
+  /** Used to compose bitmasks for cloning. */
+  var CLONE_DEEP_FLAG = 1,
+      CLONE_FLAT_FLAG = 2,
+      CLONE_SYMBOLS_FLAG = 4;
 
-  /** Used to compose bitmasks for comparison styles. */
-  var UNORDERED_COMPARE_FLAG = 1,
-      PARTIAL_COMPARE_FLAG = 2;
+  /** Used to compose bitmasks for value comparisons. */
+  var COMPARE_PARTIAL_FLAG = 1,
+      COMPARE_UNORDERED_FLAG = 2;
+
+  /** Used to compose bitmasks for function metadata. */
+  var WRAP_BIND_FLAG = 1,
+      WRAP_BIND_KEY_FLAG = 2,
+      WRAP_CURRY_BOUND_FLAG = 4,
+      WRAP_CURRY_FLAG = 8,
+      WRAP_CURRY_RIGHT_FLAG = 16,
+      WRAP_PARTIAL_FLAG = 32,
+      WRAP_PARTIAL_RIGHT_FLAG = 64,
+      WRAP_ARY_FLAG = 128,
+      WRAP_REARG_FLAG = 256,
+      WRAP_FLIP_FLAG = 512;
 
   /** Used as default options for `_.truncate`. */
   var DEFAULT_TRUNC_LENGTH = 30,
       DEFAULT_TRUNC_OMISSION = '...';
 
   /** Used to detect hot functions by number of calls within a span of milliseconds. */
-  var HOT_COUNT = 150,
+  var HOT_COUNT = 800,
       HOT_SPAN = 16;
 
   /** Used to indicate the type of lazy iteratees. */
@@ -2496,22 +2588,40 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
       MAX_ARRAY_INDEX = MAX_ARRAY_LENGTH - 1,
       HALF_MAX_ARRAY_LENGTH = MAX_ARRAY_LENGTH >>> 1;
 
+  /** Used to associate wrap methods with their bit flags. */
+  var wrapFlags = [
+    ['ary', WRAP_ARY_FLAG],
+    ['bind', WRAP_BIND_FLAG],
+    ['bindKey', WRAP_BIND_KEY_FLAG],
+    ['curry', WRAP_CURRY_FLAG],
+    ['curryRight', WRAP_CURRY_RIGHT_FLAG],
+    ['flip', WRAP_FLIP_FLAG],
+    ['partial', WRAP_PARTIAL_FLAG],
+    ['partialRight', WRAP_PARTIAL_RIGHT_FLAG],
+    ['rearg', WRAP_REARG_FLAG]
+  ];
+
   /** `Object#toString` result references. */
   var argsTag = '[object Arguments]',
       arrayTag = '[object Array]',
+      asyncTag = '[object AsyncFunction]',
       boolTag = '[object Boolean]',
       dateTag = '[object Date]',
+      domExcTag = '[object DOMException]',
       errorTag = '[object Error]',
       funcTag = '[object Function]',
       genTag = '[object GeneratorFunction]',
       mapTag = '[object Map]',
       numberTag = '[object Number]',
+      nullTag = '[object Null]',
       objectTag = '[object Object]',
       promiseTag = '[object Promise]',
+      proxyTag = '[object Proxy]',
       regexpTag = '[object RegExp]',
       setTag = '[object Set]',
       stringTag = '[object String]',
       symbolTag = '[object Symbol]',
+      undefinedTag = '[object Undefined]',
       weakMapTag = '[object WeakMap]',
       weakSetTag = '[object WeakSet]';
 
@@ -2533,8 +2643,8 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
       reEmptyStringTrailing = /(__e\(.*?\)|\b__t\)) \+\n'';/g;
 
   /** Used to match HTML entities and HTML characters. */
-  var reEscapedHtml = /&(?:amp|lt|gt|quot|#39|#96);/g,
-      reUnescapedHtml = /[&<>"'`]/g,
+  var reEscapedHtml = /&(?:amp|lt|gt|quot|#39);/g,
+      reUnescapedHtml = /[&<>"']/g,
       reHasEscapedHtml = RegExp(reEscapedHtml.source),
       reHasUnescapedHtml = RegExp(reUnescapedHtml.source);
 
@@ -2546,11 +2656,12 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
   /** Used to match property names within property paths. */
   var reIsDeepProp = /\.|\[(?:[^[\]]*|(["'])(?:(?!\1)[^\\]|\\.)*?\1)\]/,
       reIsPlainProp = /^\w*$/,
-      rePropName = /[^.[\]]+|\[(?:(-?\d+(?:\.\d+)?)|(["'])((?:(?!\2)[^\\]|\\.)*?)\2)\]|(?=(\.|\[\])(?:\4|$))/g;
+      reLeadingDot = /^\./,
+      rePropName = /[^.[\]]+|\[(?:(-?\d+(?:\.\d+)?)|(["'])((?:(?!\2)[^\\]|\\.)*?)\2)\]|(?=(?:\.|\[\])(?:\.|\[\]|$))/g;
 
   /**
    * Used to match `RegExp`
-   * [syntax characters](http://ecma-international.org/ecma-262/6.0/#sec-patterns).
+   * [syntax characters](http://ecma-international.org/ecma-262/7.0/#sec-patterns).
    */
   var reRegExpChar = /[\\^$.*+?()[\]{}|]/g,
       reHasRegExpChar = RegExp(reRegExpChar.source);
@@ -2560,23 +2671,25 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
       reTrimStart = /^\s+/,
       reTrimEnd = /\s+$/;
 
-  /** Used to match non-compound words composed of alphanumeric characters. */
-  var reBasicWord = /[a-zA-Z0-9]+/g;
+  /** Used to match wrap detail comments. */
+  var reWrapComment = /\{(?:\n\/\* \[wrapped with .+\] \*\/)?\n?/,
+      reWrapDetails = /\{\n\/\* \[wrapped with (.+)\] \*/,
+      reSplitDetails = /,? & /;
+
+  /** Used to match words composed of alphanumeric characters. */
+  var reAsciiWord = /[^\x00-\x2f\x3a-\x40\x5b-\x60\x7b-\x7f]+/g;
 
   /** Used to match backslashes in property paths. */
   var reEscapeChar = /\\(\\)?/g;
 
   /**
    * Used to match
-   * [ES template delimiters](http://ecma-international.org/ecma-262/6.0/#sec-template-literal-lexical-components).
+   * [ES template delimiters](http://ecma-international.org/ecma-262/7.0/#sec-template-literal-lexical-components).
    */
   var reEsTemplate = /\$\{([^\\}]*(?:\\.[^\\}]*)*)\}/g;
 
   /** Used to match `RegExp` flags from their coerced string values. */
   var reFlags = /\w*$/;
-
-  /** Used to detect hexadecimal string values. */
-  var reHasHexPrefix = /^0x/i;
 
   /** Used to detect bad signed hexadecimal string values. */
   var reIsBadHex = /^[-+]0x[0-9a-f]+$/i;
@@ -2593,8 +2706,8 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
   /** Used to detect unsigned integer values. */
   var reIsUint = /^(?:0|[1-9]\d*)$/;
 
-  /** Used to match latin-1 supplementary letters (excluding mathematical operators). */
-  var reLatin1 = /[\xc0-\xd6\xd8-\xde\xdf-\xf6\xf8-\xff]/g;
+  /** Used to match Latin Unicode letters (excluding mathematical operators). */
+  var reLatin = /[\xc0-\xd6\xd8-\xf6\xf8-\xff\u0100-\u017f]/g;
 
   /** Used to ensure capturing order of template delimiters. */
   var reNoMatch = /($^)/;
@@ -2604,8 +2717,10 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
 
   /** Used to compose unicode character classes. */
   var rsAstralRange = '\\ud800-\\udfff',
-      rsComboMarksRange = '\\u0300-\\u036f\\ufe20-\\ufe23',
-      rsComboSymbolsRange = '\\u20d0-\\u20f0',
+      rsComboMarksRange = '\\u0300-\\u036f',
+      reComboHalfMarksRange = '\\ufe20-\\ufe2f',
+      rsComboSymbolsRange = '\\u20d0-\\u20ff',
+      rsComboRange = rsComboMarksRange + reComboHalfMarksRange + rsComboSymbolsRange,
       rsDingbatRange = '\\u2700-\\u27bf',
       rsLowerRange = 'a-z\\xdf-\\xf6\\xf8-\\xff',
       rsMathOpRange = '\\xac\\xb1\\xd7\\xf7',
@@ -2620,7 +2735,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
   var rsApos = "['\u2019]",
       rsAstral = '[' + rsAstralRange + ']',
       rsBreak = '[' + rsBreakRange + ']',
-      rsCombo = '[' + rsComboMarksRange + rsComboSymbolsRange + ']',
+      rsCombo = '[' + rsComboRange + ']',
       rsDigits = '\\d+',
       rsDingbat = '[' + rsDingbatRange + ']',
       rsLower = '[' + rsLowerRange + ']',
@@ -2634,13 +2749,15 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
       rsZWJ = '\\u200d';
 
   /** Used to compose unicode regexes. */
-  var rsLowerMisc = '(?:' + rsLower + '|' + rsMisc + ')',
-      rsUpperMisc = '(?:' + rsUpper + '|' + rsMisc + ')',
-      rsOptLowerContr = '(?:' + rsApos + '(?:d|ll|m|re|s|t|ve))?',
-      rsOptUpperContr = '(?:' + rsApos + '(?:D|LL|M|RE|S|T|VE))?',
+  var rsMiscLower = '(?:' + rsLower + '|' + rsMisc + ')',
+      rsMiscUpper = '(?:' + rsUpper + '|' + rsMisc + ')',
+      rsOptContrLower = '(?:' + rsApos + '(?:d|ll|m|re|s|t|ve))?',
+      rsOptContrUpper = '(?:' + rsApos + '(?:D|LL|M|RE|S|T|VE))?',
       reOptMod = rsModifier + '?',
       rsOptVar = '[' + rsVarRange + ']?',
       rsOptJoin = '(?:' + rsZWJ + '(?:' + [rsNonAstral, rsRegional, rsSurrPair].join('|') + ')' + rsOptVar + reOptMod + ')*',
+      rsOrdLower = '\\d*(?:(?:1st|2nd|3rd|(?![123])\\dth)\\b)',
+      rsOrdUpper = '\\d*(?:(?:1ST|2ND|3RD|(?![123])\\dTH)\\b)',
       rsSeq = rsOptVar + reOptMod + rsOptJoin,
       rsEmoji = '(?:' + [rsDingbat, rsRegional, rsSurrPair].join('|') + ')' + rsSeq,
       rsSymbol = '(?:' + [rsNonAstral + rsCombo + '?', rsCombo, rsRegional, rsSurrPair, rsAstral].join('|') + ')';
@@ -2655,31 +2772,33 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
   var reComboMark = RegExp(rsCombo, 'g');
 
   /** Used to match [string symbols](https://mathiasbynens.be/notes/javascript-unicode). */
-  var reComplexSymbol = RegExp(rsFitz + '(?=' + rsFitz + ')|' + rsSymbol + rsSeq, 'g');
+  var reUnicode = RegExp(rsFitz + '(?=' + rsFitz + ')|' + rsSymbol + rsSeq, 'g');
 
   /** Used to match complex or compound words. */
-  var reComplexWord = RegExp([
-    rsUpper + '?' + rsLower + '+' + rsOptLowerContr + '(?=' + [rsBreak, rsUpper, '$'].join('|') + ')',
-    rsUpperMisc + '+' + rsOptUpperContr + '(?=' + [rsBreak, rsUpper + rsLowerMisc, '$'].join('|') + ')',
-    rsUpper + '?' + rsLowerMisc + '+' + rsOptLowerContr,
-    rsUpper + '+' + rsOptUpperContr,
+  var reUnicodeWord = RegExp([
+    rsUpper + '?' + rsLower + '+' + rsOptContrLower + '(?=' + [rsBreak, rsUpper, '$'].join('|') + ')',
+    rsMiscUpper + '+' + rsOptContrUpper + '(?=' + [rsBreak, rsUpper + rsMiscLower, '$'].join('|') + ')',
+    rsUpper + '?' + rsMiscLower + '+' + rsOptContrLower,
+    rsUpper + '+' + rsOptContrUpper,
+    rsOrdUpper,
+    rsOrdLower,
     rsDigits,
     rsEmoji
   ].join('|'), 'g');
 
   /** Used to detect strings with [zero-width joiners or code points from the astral planes](http://eev.ee/blog/2015/09/12/dark-corners-of-unicode/). */
-  var reHasComplexSymbol = RegExp('[' + rsZWJ + rsAstralRange  + rsComboMarksRange + rsComboSymbolsRange + rsVarRange + ']');
+  var reHasUnicode = RegExp('[' + rsZWJ + rsAstralRange  + rsComboRange + rsVarRange + ']');
 
   /** Used to detect strings that need a more robust regexp to match words. */
-  var reHasComplexWord = /[a-z][A-Z]|[A-Z]{2,}[a-z]|[0-9][a-zA-Z]|[a-zA-Z][0-9]|[^a-zA-Z0-9 ]/;
+  var reHasUnicodeWord = /[a-z][A-Z]|[A-Z]{2,}[a-z]|[0-9][a-zA-Z]|[a-zA-Z][0-9]|[^a-zA-Z0-9 ]/;
 
   /** Used to assign default `context` object properties. */
   var contextProps = [
     'Array', 'Buffer', 'DataView', 'Date', 'Error', 'Float32Array', 'Float64Array',
     'Function', 'Int8Array', 'Int16Array', 'Int32Array', 'Map', 'Math', 'Object',
-    'Promise', 'Reflect', 'RegExp', 'Set', 'String', 'Symbol', 'TypeError',
-    'Uint8Array', 'Uint8ClampedArray', 'Uint16Array', 'Uint32Array', 'WeakMap',
-    '_', 'isFinite', 'parseInt', 'setTimeout'
+    'Promise', 'RegExp', 'Set', 'String', 'Symbol', 'TypeError', 'Uint8Array',
+    'Uint8ClampedArray', 'Uint16Array', 'Uint32Array', 'WeakMap',
+    '_', 'clearTimeout', 'isFinite', 'parseInt', 'setTimeout'
   ];
 
   /** Used to make template sourceURLs easier to identify. */
@@ -2717,16 +2836,17 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
   cloneableTags[errorTag] = cloneableTags[funcTag] =
   cloneableTags[weakMapTag] = false;
 
-  /** Used to map latin-1 supplementary letters to basic latin letters. */
+  /** Used to map Latin Unicode letters to basic Latin letters. */
   var deburredLetters = {
+    // Latin-1 Supplement block.
     '\xc0': 'A',  '\xc1': 'A', '\xc2': 'A', '\xc3': 'A', '\xc4': 'A', '\xc5': 'A',
     '\xe0': 'a',  '\xe1': 'a', '\xe2': 'a', '\xe3': 'a', '\xe4': 'a', '\xe5': 'a',
     '\xc7': 'C',  '\xe7': 'c',
     '\xd0': 'D',  '\xf0': 'd',
     '\xc8': 'E',  '\xc9': 'E', '\xca': 'E', '\xcb': 'E',
     '\xe8': 'e',  '\xe9': 'e', '\xea': 'e', '\xeb': 'e',
-    '\xcC': 'I',  '\xcd': 'I', '\xce': 'I', '\xcf': 'I',
-    '\xeC': 'i',  '\xed': 'i', '\xee': 'i', '\xef': 'i',
+    '\xcc': 'I',  '\xcd': 'I', '\xce': 'I', '\xcf': 'I',
+    '\xec': 'i',  '\xed': 'i', '\xee': 'i', '\xef': 'i',
     '\xd1': 'N',  '\xf1': 'n',
     '\xd2': 'O',  '\xd3': 'O', '\xd4': 'O', '\xd5': 'O', '\xd6': 'O', '\xd8': 'O',
     '\xf2': 'o',  '\xf3': 'o', '\xf4': 'o', '\xf5': 'o', '\xf6': 'o', '\xf8': 'o',
@@ -2735,7 +2855,43 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
     '\xdd': 'Y',  '\xfd': 'y', '\xff': 'y',
     '\xc6': 'Ae', '\xe6': 'ae',
     '\xde': 'Th', '\xfe': 'th',
-    '\xdf': 'ss'
+    '\xdf': 'ss',
+    // Latin Extended-A block.
+    '\u0100': 'A',  '\u0102': 'A', '\u0104': 'A',
+    '\u0101': 'a',  '\u0103': 'a', '\u0105': 'a',
+    '\u0106': 'C',  '\u0108': 'C', '\u010a': 'C', '\u010c': 'C',
+    '\u0107': 'c',  '\u0109': 'c', '\u010b': 'c', '\u010d': 'c',
+    '\u010e': 'D',  '\u0110': 'D', '\u010f': 'd', '\u0111': 'd',
+    '\u0112': 'E',  '\u0114': 'E', '\u0116': 'E', '\u0118': 'E', '\u011a': 'E',
+    '\u0113': 'e',  '\u0115': 'e', '\u0117': 'e', '\u0119': 'e', '\u011b': 'e',
+    '\u011c': 'G',  '\u011e': 'G', '\u0120': 'G', '\u0122': 'G',
+    '\u011d': 'g',  '\u011f': 'g', '\u0121': 'g', '\u0123': 'g',
+    '\u0124': 'H',  '\u0126': 'H', '\u0125': 'h', '\u0127': 'h',
+    '\u0128': 'I',  '\u012a': 'I', '\u012c': 'I', '\u012e': 'I', '\u0130': 'I',
+    '\u0129': 'i',  '\u012b': 'i', '\u012d': 'i', '\u012f': 'i', '\u0131': 'i',
+    '\u0134': 'J',  '\u0135': 'j',
+    '\u0136': 'K',  '\u0137': 'k', '\u0138': 'k',
+    '\u0139': 'L',  '\u013b': 'L', '\u013d': 'L', '\u013f': 'L', '\u0141': 'L',
+    '\u013a': 'l',  '\u013c': 'l', '\u013e': 'l', '\u0140': 'l', '\u0142': 'l',
+    '\u0143': 'N',  '\u0145': 'N', '\u0147': 'N', '\u014a': 'N',
+    '\u0144': 'n',  '\u0146': 'n', '\u0148': 'n', '\u014b': 'n',
+    '\u014c': 'O',  '\u014e': 'O', '\u0150': 'O',
+    '\u014d': 'o',  '\u014f': 'o', '\u0151': 'o',
+    '\u0154': 'R',  '\u0156': 'R', '\u0158': 'R',
+    '\u0155': 'r',  '\u0157': 'r', '\u0159': 'r',
+    '\u015a': 'S',  '\u015c': 'S', '\u015e': 'S', '\u0160': 'S',
+    '\u015b': 's',  '\u015d': 's', '\u015f': 's', '\u0161': 's',
+    '\u0162': 'T',  '\u0164': 'T', '\u0166': 'T',
+    '\u0163': 't',  '\u0165': 't', '\u0167': 't',
+    '\u0168': 'U',  '\u016a': 'U', '\u016c': 'U', '\u016e': 'U', '\u0170': 'U', '\u0172': 'U',
+    '\u0169': 'u',  '\u016b': 'u', '\u016d': 'u', '\u016f': 'u', '\u0171': 'u', '\u0173': 'u',
+    '\u0174': 'W',  '\u0175': 'w',
+    '\u0176': 'Y',  '\u0177': 'y', '\u0178': 'Y',
+    '\u0179': 'Z',  '\u017b': 'Z', '\u017d': 'Z',
+    '\u017a': 'z',  '\u017c': 'z', '\u017e': 'z',
+    '\u0132': 'IJ', '\u0133': 'ij',
+    '\u0152': 'Oe', '\u0153': 'oe',
+    '\u0149': "'n", '\u017f': 's'
   };
 
   /** Used to map characters to HTML entities. */
@@ -2744,8 +2900,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
     '<': '&lt;',
     '>': '&gt;',
     '"': '&quot;',
-    "'": '&#39;',
-    '`': '&#96;'
+    "'": '&#39;'
   };
 
   /** Used to map HTML entities to characters. */
@@ -2754,8 +2909,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
     '&lt;': '<',
     '&gt;': '>',
     '&quot;': '"',
-    '&#39;': "'",
-    '&#96;': '`'
+    '&#39;': "'"
   };
 
   /** Used to escape characters for inclusion in compiled string literals. */
@@ -2772,26 +2926,41 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
   var freeParseFloat = parseFloat,
       freeParseInt = parseInt;
 
+  /** Detect free variable `global` from Node.js. */
+  var freeGlobal = typeof global == 'object' && global && global.Object === Object && global;
+
+  /** Detect free variable `self`. */
+  var freeSelf = typeof self == 'object' && self && self.Object === Object && self;
+
+  /** Used as a reference to the global object. */
+  var root = freeGlobal || freeSelf || Function('return this')();
+
   /** Detect free variable `exports`. */
-  var freeExports = typeof exports == 'object' && exports;
+  var freeExports = typeof exports == 'object' && exports && !exports.nodeType && exports;
 
   /** Detect free variable `module`. */
-  var freeModule = freeExports && typeof module == 'object' && module;
+  var freeModule = freeExports && typeof module == 'object' && module && !module.nodeType && module;
 
   /** Detect the popular CommonJS extension `module.exports`. */
   var moduleExports = freeModule && freeModule.exports === freeExports;
 
-  /** Detect free variable `global` from Node.js. */
-  var freeGlobal = checkGlobal(typeof global == 'object' && global);
+  /** Detect free variable `process` from Node.js. */
+  var freeProcess = moduleExports && freeGlobal.process;
 
-  /** Detect free variable `self`. */
-  var freeSelf = checkGlobal(typeof self == 'object' && self);
+  /** Used to access faster Node.js helpers. */
+  var nodeUtil = (function() {
+    try {
+      return freeProcess && freeProcess.binding && freeProcess.binding('util');
+    } catch (e) {}
+  }());
 
-  /** Detect `this` as the global object. */
-  var thisGlobal = checkGlobal(typeof this == 'object' && this);
-
-  /** Used as a reference to the global object. */
-  var root = freeGlobal || freeSelf || thisGlobal || Function('return this')();
+  /* Node.js helper references. */
+  var nodeIsArrayBuffer = nodeUtil && nodeUtil.isArrayBuffer,
+      nodeIsDate = nodeUtil && nodeUtil.isDate,
+      nodeIsMap = nodeUtil && nodeUtil.isMap,
+      nodeIsRegExp = nodeUtil && nodeUtil.isRegExp,
+      nodeIsSet = nodeUtil && nodeUtil.isSet,
+      nodeIsTypedArray = nodeUtil && nodeUtil.isTypedArray;
 
   /*--------------------------------------------------------------------------*/
 
@@ -2804,7 +2973,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
    * @returns {Object} Returns `map`.
    */
   function addMapEntry(map, pair) {
-    // Don't return `Map#set` because it doesn't return the map instance in IE 11.
+    // Don't return `map.set` because it's not chainable in IE 11.
     map.set(pair[0], pair[1]);
     return map;
   }
@@ -2818,6 +2987,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
    * @returns {Object} Returns `set`.
    */
   function addSetEntry(set, value) {
+    // Don't return `set.add` because it's not chainable in IE 11.
     set.add(value);
     return set;
   }
@@ -2833,8 +3003,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
    * @returns {*} Returns the result of `func`.
    */
   function apply(func, thisArg, args) {
-    var length = args.length;
-    switch (length) {
+    switch (args.length) {
       case 0: return func.call(thisArg);
       case 1: return func.call(thisArg, args[0]);
       case 2: return func.call(thisArg, args[0], args[1]);
@@ -2855,7 +3024,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
    */
   function arrayAggregator(array, setter, iteratee, accumulator) {
     var index = -1,
-        length = array ? array.length : 0;
+        length = array == null ? 0 : array.length;
 
     while (++index < length) {
       var value = array[index];
@@ -2875,7 +3044,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
    */
   function arrayEach(array, iteratee) {
     var index = -1,
-        length = array ? array.length : 0;
+        length = array == null ? 0 : array.length;
 
     while (++index < length) {
       if (iteratee(array[index], index, array) === false) {
@@ -2895,7 +3064,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
    * @returns {Array} Returns `array`.
    */
   function arrayEachRight(array, iteratee) {
-    var length = array ? array.length : 0;
+    var length = array == null ? 0 : array.length;
 
     while (length--) {
       if (iteratee(array[length], length, array) === false) {
@@ -2917,7 +3086,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
    */
   function arrayEvery(array, predicate) {
     var index = -1,
-        length = array ? array.length : 0;
+        length = array == null ? 0 : array.length;
 
     while (++index < length) {
       if (!predicate(array[index], index, array)) {
@@ -2938,7 +3107,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
    */
   function arrayFilter(array, predicate) {
     var index = -1,
-        length = array ? array.length : 0,
+        length = array == null ? 0 : array.length,
         resIndex = 0,
         result = [];
 
@@ -2956,12 +3125,12 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
    * specifying an index to search from.
    *
    * @private
-   * @param {Array} [array] The array to search.
+   * @param {Array} [array] The array to inspect.
    * @param {*} target The value to search for.
    * @returns {boolean} Returns `true` if `target` is found, else `false`.
    */
   function arrayIncludes(array, value) {
-    var length = array ? array.length : 0;
+    var length = array == null ? 0 : array.length;
     return !!length && baseIndexOf(array, value, 0) > -1;
   }
 
@@ -2969,14 +3138,14 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
    * This function is like `arrayIncludes` except that it accepts a comparator.
    *
    * @private
-   * @param {Array} [array] The array to search.
+   * @param {Array} [array] The array to inspect.
    * @param {*} target The value to search for.
    * @param {Function} comparator The comparator invoked per element.
    * @returns {boolean} Returns `true` if `target` is found, else `false`.
    */
   function arrayIncludesWith(array, value, comparator) {
     var index = -1,
-        length = array ? array.length : 0;
+        length = array == null ? 0 : array.length;
 
     while (++index < length) {
       if (comparator(value, array[index])) {
@@ -2997,7 +3166,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
    */
   function arrayMap(array, iteratee) {
     var index = -1,
-        length = array ? array.length : 0,
+        length = array == null ? 0 : array.length,
         result = Array(length);
 
     while (++index < length) {
@@ -3039,7 +3208,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
    */
   function arrayReduce(array, iteratee, accumulator, initAccum) {
     var index = -1,
-        length = array ? array.length : 0;
+        length = array == null ? 0 : array.length;
 
     if (initAccum && length) {
       accumulator = array[++index];
@@ -3063,7 +3232,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
    * @returns {*} Returns the accumulated value.
    */
   function arrayReduceRight(array, iteratee, accumulator, initAccum) {
-    var length = array ? array.length : 0;
+    var length = array == null ? 0 : array.length;
     if (initAccum && length) {
       accumulator = array[--length];
     }
@@ -3085,7 +3254,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
    */
   function arraySome(array, predicate) {
     var index = -1,
-        length = array ? array.length : 0;
+        length = array == null ? 0 : array.length;
 
     while (++index < length) {
       if (predicate(array[index], index, array)) {
@@ -3096,12 +3265,43 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
   }
 
   /**
+   * Gets the size of an ASCII `string`.
+   *
+   * @private
+   * @param {string} string The string inspect.
+   * @returns {number} Returns the string size.
+   */
+  var asciiSize = baseProperty('length');
+
+  /**
+   * Converts an ASCII `string` to an array.
+   *
+   * @private
+   * @param {string} string The string to convert.
+   * @returns {Array} Returns the converted array.
+   */
+  function asciiToArray(string) {
+    return string.split('');
+  }
+
+  /**
+   * Splits an ASCII `string` into an array of its words.
+   *
+   * @private
+   * @param {string} The string to inspect.
+   * @returns {Array} Returns the words of `string`.
+   */
+  function asciiWords(string) {
+    return string.match(reAsciiWord) || [];
+  }
+
+  /**
    * The base implementation of methods like `_.findKey` and `_.findLastKey`,
    * without support for iteratee shorthands, which iterates over `collection`
    * using `eachFunc`.
    *
    * @private
-   * @param {Array|Object} collection The collection to search.
+   * @param {Array|Object} collection The collection to inspect.
    * @param {Function} predicate The function invoked per iteration.
    * @param {Function} eachFunc The function to iterate over `collection`.
    * @returns {*} Returns the found element or its key, else `undefined`.
@@ -3122,7 +3322,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
    * support for iteratee shorthands.
    *
    * @private
-   * @param {Array} array The array to search.
+   * @param {Array} array The array to inspect.
    * @param {Function} predicate The function invoked per iteration.
    * @param {number} fromIndex The index to search from.
    * @param {boolean} [fromRight] Specify iterating from right to left.
@@ -3144,31 +3344,22 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
    * The base implementation of `_.indexOf` without `fromIndex` bounds checks.
    *
    * @private
-   * @param {Array} array The array to search.
+   * @param {Array} array The array to inspect.
    * @param {*} value The value to search for.
    * @param {number} fromIndex The index to search from.
    * @returns {number} Returns the index of the matched value, else `-1`.
    */
   function baseIndexOf(array, value, fromIndex) {
-    if (value !== value) {
-      return indexOfNaN(array, fromIndex);
-    }
-    var index = fromIndex - 1,
-        length = array.length;
-
-    while (++index < length) {
-      if (array[index] === value) {
-        return index;
-      }
-    }
-    return -1;
+    return value === value
+      ? strictIndexOf(array, value, fromIndex)
+      : baseFindIndex(array, baseIsNaN, fromIndex);
   }
 
   /**
    * This function is like `baseIndexOf` except that it accepts a comparator.
    *
    * @private
-   * @param {Array} array The array to search.
+   * @param {Array} array The array to inspect.
    * @param {*} value The value to search for.
    * @param {number} fromIndex The index to search from.
    * @param {Function} comparator The comparator invoked per element.
@@ -3187,6 +3378,17 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
   }
 
   /**
+   * The base implementation of `_.isNaN` without support for number objects.
+   *
+   * @private
+   * @param {*} value The value to check.
+   * @returns {boolean} Returns `true` if `value` is `NaN`, else `false`.
+   */
+  function baseIsNaN(value) {
+    return value !== value;
+  }
+
+  /**
    * The base implementation of `_.mean` and `_.meanBy` without support for
    * iteratee shorthands.
    *
@@ -3196,8 +3398,34 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
    * @returns {number} Returns the mean.
    */
   function baseMean(array, iteratee) {
-    var length = array ? array.length : 0;
+    var length = array == null ? 0 : array.length;
     return length ? (baseSum(array, iteratee) / length) : NAN;
+  }
+
+  /**
+   * The base implementation of `_.property` without support for deep paths.
+   *
+   * @private
+   * @param {string} key The key of the property to get.
+   * @returns {Function} Returns the new accessor function.
+   */
+  function baseProperty(key) {
+    return function(object) {
+      return object == null ? undefined : object[key];
+    };
+  }
+
+  /**
+   * The base implementation of `_.propertyOf` without support for deep paths.
+   *
+   * @private
+   * @param {Object} object The object to query.
+   * @returns {Function} Returns the new accessor function.
+   */
+  function basePropertyOf(object) {
+    return function(key) {
+      return object == null ? undefined : object[key];
+    };
   }
 
   /**
@@ -3300,7 +3528,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
   }
 
   /**
-   * The base implementation of `_.unary` without support for storing wrapper metadata.
+   * The base implementation of `_.unary` without support for storing metadata.
    *
    * @private
    * @param {Function} func The function to cap arguments for.
@@ -3329,7 +3557,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
   }
 
   /**
-   * Checks if a cache value for `key` exists.
+   * Checks if a `cache` value for `key` exists.
    *
    * @private
    * @param {Object} cache The cache to query.
@@ -3374,17 +3602,6 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
   }
 
   /**
-   * Checks if `value` is a global object.
-   *
-   * @private
-   * @param {*} value The value to check.
-   * @returns {null|Object} Returns `value` if it's a global object, else `null`.
-   */
-  function checkGlobal(value) {
-    return (value && value.Object === Object) ? value : null;
-  }
-
-  /**
    * Gets the number of `placeholder` occurrences in `array`.
    *
    * @private
@@ -3398,22 +3615,21 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
 
     while (length--) {
       if (array[length] === placeholder) {
-        result++;
+        ++result;
       }
     }
     return result;
   }
 
   /**
-   * Used by `_.deburr` to convert latin-1 supplementary letters to basic latin letters.
+   * Used by `_.deburr` to convert Latin-1 Supplement and Latin Extended-A
+   * letters to basic Latin letters.
    *
    * @private
    * @param {string} letter The matched letter to deburr.
    * @returns {string} Returns the deburred letter.
    */
-  function deburrLetter(letter) {
-    return deburredLetters[letter];
-  }
+  var deburrLetter = basePropertyOf(deburredLetters);
 
   /**
    * Used by `_.escape` to convert characters to HTML entities.
@@ -3422,9 +3638,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
    * @param {string} chr The matched character to escape.
    * @returns {string} Returns the escaped character.
    */
-  function escapeHtmlChar(chr) {
-    return htmlEscapes[chr];
-  }
+  var escapeHtmlChar = basePropertyOf(htmlEscapes);
 
   /**
    * Used by `_.template` to escape characters for inclusion in compiled string literals.
@@ -3450,44 +3664,25 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
   }
 
   /**
-   * Gets the index at which the first occurrence of `NaN` is found in `array`.
+   * Checks if `string` contains Unicode symbols.
    *
    * @private
-   * @param {Array} array The array to search.
-   * @param {number} fromIndex The index to search from.
-   * @param {boolean} [fromRight] Specify iterating from right to left.
-   * @returns {number} Returns the index of the matched `NaN`, else `-1`.
+   * @param {string} string The string to inspect.
+   * @returns {boolean} Returns `true` if a symbol is found, else `false`.
    */
-  function indexOfNaN(array, fromIndex, fromRight) {
-    var length = array.length,
-        index = fromIndex + (fromRight ? 1 : -1);
-
-    while ((fromRight ? index-- : ++index < length)) {
-      var other = array[index];
-      if (other !== other) {
-        return index;
-      }
-    }
-    return -1;
+  function hasUnicode(string) {
+    return reHasUnicode.test(string);
   }
 
   /**
-   * Checks if `value` is a host object in IE < 9.
+   * Checks if `string` contains a word composed of Unicode symbols.
    *
    * @private
-   * @param {*} value The value to check.
-   * @returns {boolean} Returns `true` if `value` is a host object, else `false`.
+   * @param {string} string The string to inspect.
+   * @returns {boolean} Returns `true` if a word is found, else `false`.
    */
-  function isHostObject(value) {
-    // Many host objects are `Object` objects that can coerce to strings
-    // despite having improperly defined `toString` methods.
-    var result = false;
-    if (value != null && typeof value.toString != 'function') {
-      try {
-        result = !!(value + '');
-      } catch (e) {}
-    }
-    return result;
+  function hasUnicodeWord(string) {
+    return reHasUnicodeWord.test(string);
   }
 
   /**
@@ -3522,6 +3717,20 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
       result[++index] = [key, value];
     });
     return result;
+  }
+
+  /**
+   * Creates a unary function that invokes `func` with its argument transformed.
+   *
+   * @private
+   * @param {Function} func The function to wrap.
+   * @param {Function} transform The argument transform.
+   * @returns {Function} Returns the new function.
+   */
+  function overArg(func, transform) {
+    return function(arg) {
+      return func(transform(arg));
+    };
   }
 
   /**
@@ -3584,6 +3793,48 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
   }
 
   /**
+   * A specialized version of `_.indexOf` which performs strict equality
+   * comparisons of values, i.e. `===`.
+   *
+   * @private
+   * @param {Array} array The array to inspect.
+   * @param {*} value The value to search for.
+   * @param {number} fromIndex The index to search from.
+   * @returns {number} Returns the index of the matched value, else `-1`.
+   */
+  function strictIndexOf(array, value, fromIndex) {
+    var index = fromIndex - 1,
+        length = array.length;
+
+    while (++index < length) {
+      if (array[index] === value) {
+        return index;
+      }
+    }
+    return -1;
+  }
+
+  /**
+   * A specialized version of `_.lastIndexOf` which performs strict equality
+   * comparisons of values, i.e. `===`.
+   *
+   * @private
+   * @param {Array} array The array to inspect.
+   * @param {*} value The value to search for.
+   * @param {number} fromIndex The index to search from.
+   * @returns {number} Returns the index of the matched value, else `-1`.
+   */
+  function strictLastIndexOf(array, value, fromIndex) {
+    var index = fromIndex + 1;
+    while (index--) {
+      if (array[index] === value) {
+        return index;
+      }
+    }
+    return index;
+  }
+
+  /**
    * Gets the number of symbols in `string`.
    *
    * @private
@@ -3591,14 +3842,9 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
    * @returns {number} Returns the string size.
    */
   function stringSize(string) {
-    if (!(string && reHasComplexSymbol.test(string))) {
-      return string.length;
-    }
-    var result = reComplexSymbol.lastIndex = 0;
-    while (reComplexSymbol.test(string)) {
-      result++;
-    }
-    return result;
+    return hasUnicode(string)
+      ? unicodeSize(string)
+      : asciiSize(string);
   }
 
   /**
@@ -3609,7 +3855,9 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
    * @returns {Array} Returns the converted array.
    */
   function stringToArray(string) {
-    return string.match(reComplexSymbol);
+    return hasUnicode(string)
+      ? unicodeToArray(string)
+      : asciiToArray(string);
   }
 
   /**
@@ -3619,8 +3867,43 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
    * @param {string} chr The matched character to unescape.
    * @returns {string} Returns the unescaped character.
    */
-  function unescapeHtmlChar(chr) {
-    return htmlUnescapes[chr];
+  var unescapeHtmlChar = basePropertyOf(htmlUnescapes);
+
+  /**
+   * Gets the size of a Unicode `string`.
+   *
+   * @private
+   * @param {string} string The string inspect.
+   * @returns {number} Returns the string size.
+   */
+  function unicodeSize(string) {
+    var result = reUnicode.lastIndex = 0;
+    while (reUnicode.test(string)) {
+      ++result;
+    }
+    return result;
+  }
+
+  /**
+   * Converts a Unicode `string` to an array.
+   *
+   * @private
+   * @param {string} string The string to convert.
+   * @returns {Array} Returns the converted array.
+   */
+  function unicodeToArray(string) {
+    return string.match(reUnicode) || [];
+  }
+
+  /**
+   * Splits a Unicode `string` into an array of its words.
+   *
+   * @private
+   * @param {string} The string to inspect.
+   * @returns {Array} Returns the words of `string`.
+   */
+  function unicodeWords(string) {
+    return string.match(reUnicodeWord) || [];
   }
 
   /*--------------------------------------------------------------------------*/
@@ -3651,42 +3934,33 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
    * lodash.isFunction(lodash.bar);
    * // => true
    *
-   * // Use `context` to stub `Date#getTime` use in `_.now`.
-   * var stubbed = _.runInContext({
-   *   'Date': function() {
-   *     return { 'getTime': stubGetTime };
-   *   }
-   * });
-   *
    * // Create a suped-up `defer` in Node.js.
    * var defer = _.runInContext({ 'setTimeout': setImmediate }).defer;
    */
-  function runInContext(context) {
-    context = context ? _.defaults({}, context, _.pick(root, contextProps)) : root;
+  var runInContext = (function runInContext(context) {
+    context = context == null ? root : _.defaults(root.Object(), context, _.pick(root, contextProps));
 
     /** Built-in constructor references. */
-    var Date = context.Date,
+    var Array = context.Array,
+        Date = context.Date,
         Error = context.Error,
+        Function = context.Function,
         Math = context.Math,
+        Object = context.Object,
         RegExp = context.RegExp,
+        String = context.String,
         TypeError = context.TypeError;
 
     /** Used for built-in method references. */
-    var arrayProto = context.Array.prototype,
-        objectProto = context.Object.prototype,
-        stringProto = context.String.prototype;
+    var arrayProto = Array.prototype,
+        funcProto = Function.prototype,
+        objectProto = Object.prototype;
 
     /** Used to detect overreaching core-js shims. */
     var coreJsData = context['__core-js_shared__'];
 
-    /** Used to detect methods masquerading as native. */
-    var maskSrcKey = (function() {
-      var uid = /[^.]+$/.exec(coreJsData && coreJsData.keys && coreJsData.keys.IE_PROTO || '');
-      return uid ? ('Symbol(src)_1.' + uid) : '';
-    }());
-
     /** Used to resolve the decompiled source of functions. */
-    var funcToString = context.Function.prototype.toString;
+    var funcToString = funcProto.toString;
 
     /** Used to check objects for own properties. */
     var hasOwnProperty = objectProto.hasOwnProperty;
@@ -3694,15 +3968,21 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
     /** Used to generate unique IDs. */
     var idCounter = 0;
 
-    /** Used to infer the `Object` constructor. */
-    var objectCtorString = funcToString.call(Object);
+    /** Used to detect methods masquerading as native. */
+    var maskSrcKey = (function() {
+      var uid = /[^.]+$/.exec(coreJsData && coreJsData.keys && coreJsData.keys.IE_PROTO || '');
+      return uid ? ('Symbol(src)_1.' + uid) : '';
+    }());
 
     /**
      * Used to resolve the
-     * [`toStringTag`](http://ecma-international.org/ecma-262/6.0/#sec-object.prototype.tostring)
+     * [`toStringTag`](http://ecma-international.org/ecma-262/7.0/#sec-object.prototype.tostring)
      * of values.
      */
-    var objectToString = objectProto.toString;
+    var nativeObjectToString = objectProto.toString;
+
+    /** Used to infer the `Object` constructor. */
+    var objectCtorString = funcToString.call(Object);
 
     /** Used to restore the original `_` reference in `_.noConflict`. */
     var oldDash = root._;
@@ -3715,33 +3995,44 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
 
     /** Built-in value references. */
     var Buffer = moduleExports ? context.Buffer : undefined,
-        Reflect = context.Reflect,
         Symbol = context.Symbol,
         Uint8Array = context.Uint8Array,
-        enumerate = Reflect ? Reflect.enumerate : undefined,
-        getOwnPropertySymbols = Object.getOwnPropertySymbols,
-        iteratorSymbol = typeof (iteratorSymbol = Symbol && Symbol.iterator) == 'symbol' ? iteratorSymbol : undefined,
+        allocUnsafe = Buffer ? Buffer.allocUnsafe : undefined,
+        getPrototype = overArg(Object.getPrototypeOf, Object),
         objectCreate = Object.create,
         propertyIsEnumerable = objectProto.propertyIsEnumerable,
-        splice = arrayProto.splice;
+        splice = arrayProto.splice,
+        spreadableSymbol = Symbol ? Symbol.isConcatSpreadable : undefined,
+        symIterator = Symbol ? Symbol.iterator : undefined,
+        symToStringTag = Symbol ? Symbol.toStringTag : undefined;
 
-    /** Built-in method references that are mockable. */
-    var setTimeout = function(func, wait) { return context.setTimeout.call(root, func, wait); };
+    var defineProperty = (function() {
+      try {
+        var func = getNative(Object, 'defineProperty');
+        func({}, '', {});
+        return func;
+      } catch (e) {}
+    }());
+
+    /** Mocked built-ins. */
+    var ctxClearTimeout = context.clearTimeout !== root.clearTimeout && context.clearTimeout,
+        ctxNow = Date && Date.now !== root.Date.now && Date.now,
+        ctxSetTimeout = context.setTimeout !== root.setTimeout && context.setTimeout;
 
     /* Built-in method references for those with the same name as other `lodash` methods. */
     var nativeCeil = Math.ceil,
         nativeFloor = Math.floor,
-        nativeGetPrototype = Object.getPrototypeOf,
+        nativeGetSymbols = Object.getOwnPropertySymbols,
+        nativeIsBuffer = Buffer ? Buffer.isBuffer : undefined,
         nativeIsFinite = context.isFinite,
         nativeJoin = arrayProto.join,
-        nativeKeys = Object.keys,
+        nativeKeys = overArg(Object.keys, Object),
         nativeMax = Math.max,
         nativeMin = Math.min,
+        nativeNow = Date.now,
         nativeParseInt = context.parseInt,
         nativeRandom = Math.random,
-        nativeReplace = stringProto.replace,
-        nativeReverse = arrayProto.reverse,
-        nativeSplit = stringProto.split;
+        nativeReverse = arrayProto.reverse;
 
     /* Built-in method references that are verified to be native. */
     var DataView = getNative(context, 'DataView'),
@@ -3753,9 +4044,6 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
 
     /** Used to store function metadata. */
     var metaMap = WeakMap && new WeakMap;
-
-    /** Detect if properties shadowing those on `Object.prototype` are non-enumerable. */
-    var nonEnumShadows = !propertyIsEnumerable.call({ 'valueOf': 1 }, 'valueOf');
 
     /** Used to lookup unminified function names. */
     var realNames = {};
@@ -3840,16 +4128,16 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      *
      * The wrapper methods that are **not** chainable by default are:
      * `add`, `attempt`, `camelCase`, `capitalize`, `ceil`, `clamp`, `clone`,
-     * `cloneDeep`, `cloneDeepWith`, `cloneWith`, `deburr`, `divide`, `each`,
-     * `eachRight`, `endsWith`, `eq`, `escape`, `escapeRegExp`, `every`, `find`,
-     * `findIndex`, `findKey`, `findLast`, `findLastIndex`, `findLastKey`, `first`,
-     * `floor`, `forEach`, `forEachRight`, `forIn`, `forInRight`, `forOwn`,
-     * `forOwnRight`, `get`, `gt`, `gte`, `has`, `hasIn`, `head`, `identity`,
-     * `includes`, `indexOf`, `inRange`, `invoke`, `isArguments`, `isArray`,
-     * `isArrayBuffer`, `isArrayLike`, `isArrayLikeObject`, `isBoolean`,
-     * `isBuffer`, `isDate`, `isElement`, `isEmpty`, `isEqual`, `isEqualWith`,
-     * `isError`, `isFinite`, `isFunction`, `isInteger`, `isLength`, `isMap`,
-     * `isMatch`, `isMatchWith`, `isNaN`, `isNative`, `isNil`, `isNull`,
+     * `cloneDeep`, `cloneDeepWith`, `cloneWith`, `conformsTo`, `deburr`,
+     * `defaultTo`, `divide`, `each`, `eachRight`, `endsWith`, `eq`, `escape`,
+     * `escapeRegExp`, `every`, `find`, `findIndex`, `findKey`, `findLast`,
+     * `findLastIndex`, `findLastKey`, `first`, `floor`, `forEach`, `forEachRight`,
+     * `forIn`, `forInRight`, `forOwn`, `forOwnRight`, `get`, `gt`, `gte`, `has`,
+     * `hasIn`, `head`, `identity`, `includes`, `indexOf`, `inRange`, `invoke`,
+     * `isArguments`, `isArray`, `isArrayBuffer`, `isArrayLike`, `isArrayLikeObject`,
+     * `isBoolean`, `isBuffer`, `isDate`, `isElement`, `isEmpty`, `isEqual`,
+     * `isEqualWith`, `isError`, `isFinite`, `isFunction`, `isInteger`, `isLength`,
+     * `isMap`, `isMatch`, `isMatchWith`, `isNaN`, `isNative`, `isNil`, `isNull`,
      * `isNumber`, `isObject`, `isObjectLike`, `isPlainObject`, `isRegExp`,
      * `isSafeInteger`, `isSet`, `isString`, `isUndefined`, `isTypedArray`,
      * `isWeakMap`, `isWeakSet`, `join`, `kebabCase`, `last`, `lastIndexOf`,
@@ -3902,6 +4190,30 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
       }
       return new LodashWrapper(value);
     }
+
+    /**
+     * The base implementation of `_.create` without support for assigning
+     * properties to the created object.
+     *
+     * @private
+     * @param {Object} proto The object to inherit from.
+     * @returns {Object} Returns the new object.
+     */
+    var baseCreate = (function() {
+      function object() {}
+      return function(proto) {
+        if (!isObject(proto)) {
+          return {};
+        }
+        if (objectCreate) {
+          return objectCreate(proto);
+        }
+        object.prototype = proto;
+        var result = new object;
+        object.prototype = undefined;
+        return result;
+      };
+    }());
 
     /**
      * The function whose prototype chain sequence wrappers inherit from.
@@ -4126,7 +4438,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      */
     function Hash(entries) {
       var index = -1,
-          length = entries ? entries.length : 0;
+          length = entries == null ? 0 : entries.length;
 
       this.clear();
       while (++index < length) {
@@ -4144,6 +4456,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      */
     function hashClear() {
       this.__data__ = nativeCreate ? nativeCreate(null) : {};
+      this.size = 0;
     }
 
     /**
@@ -4157,7 +4470,9 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @returns {boolean} Returns `true` if the entry was removed, else `false`.
      */
     function hashDelete(key) {
-      return this.has(key) && delete this.__data__[key];
+      var result = this.has(key) && delete this.__data__[key];
+      this.size -= result ? 1 : 0;
+      return result;
     }
 
     /**
@@ -4204,6 +4519,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      */
     function hashSet(key, value) {
       var data = this.__data__;
+      this.size += this.has(key) ? 0 : 1;
       data[key] = (nativeCreate && value === undefined) ? HASH_UNDEFINED : value;
       return this;
     }
@@ -4226,7 +4542,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      */
     function ListCache(entries) {
       var index = -1,
-          length = entries ? entries.length : 0;
+          length = entries == null ? 0 : entries.length;
 
       this.clear();
       while (++index < length) {
@@ -4244,6 +4560,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      */
     function listCacheClear() {
       this.__data__ = [];
+      this.size = 0;
     }
 
     /**
@@ -4268,6 +4585,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
       } else {
         splice.call(data, index, 1);
       }
+      --this.size;
       return true;
     }
 
@@ -4315,6 +4633,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
           index = assocIndexOf(data, key);
 
       if (index < 0) {
+        ++this.size;
         data.push([key, value]);
       } else {
         data[index][1] = value;
@@ -4340,7 +4659,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      */
     function MapCache(entries) {
       var index = -1,
-          length = entries ? entries.length : 0;
+          length = entries == null ? 0 : entries.length;
 
       this.clear();
       while (++index < length) {
@@ -4357,6 +4676,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @memberOf MapCache
      */
     function mapCacheClear() {
+      this.size = 0;
       this.__data__ = {
         'hash': new Hash,
         'map': new (Map || ListCache),
@@ -4374,7 +4694,9 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @returns {boolean} Returns `true` if the entry was removed, else `false`.
      */
     function mapCacheDelete(key) {
-      return getMapData(this, key)['delete'](key);
+      var result = getMapData(this, key)['delete'](key);
+      this.size -= result ? 1 : 0;
+      return result;
     }
 
     /**
@@ -4414,7 +4736,11 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @returns {Object} Returns the map cache instance.
      */
     function mapCacheSet(key, value) {
-      getMapData(this, key).set(key, value);
+      var data = getMapData(this, key),
+          size = data.size;
+
+      data.set(key, value);
+      this.size += data.size == size ? 0 : 1;
       return this;
     }
 
@@ -4437,7 +4763,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      */
     function SetCache(values) {
       var index = -1,
-          length = values ? values.length : 0;
+          length = values == null ? 0 : values.length;
 
       this.__data__ = new MapCache;
       while (++index < length) {
@@ -4487,7 +4813,8 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @param {Array} [entries] The key-value pairs to cache.
      */
     function Stack(entries) {
-      this.__data__ = new ListCache(entries);
+      var data = this.__data__ = new ListCache(entries);
+      this.size = data.size;
     }
 
     /**
@@ -4499,6 +4826,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      */
     function stackClear() {
       this.__data__ = new ListCache;
+      this.size = 0;
     }
 
     /**
@@ -4511,7 +4839,11 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @returns {boolean} Returns `true` if the entry was removed, else `false`.
      */
     function stackDelete(key) {
-      return this.__data__['delete'](key);
+      var data = this.__data__,
+          result = data['delete'](key);
+
+      this.size = data.size;
+      return result;
     }
 
     /**
@@ -4551,11 +4883,18 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @returns {Object} Returns the stack cache instance.
      */
     function stackSet(key, value) {
-      var cache = this.__data__;
-      if (cache instanceof ListCache && cache.__data__.length == LARGE_ARRAY_SIZE) {
-        cache = this.__data__ = new MapCache(cache.__data__);
+      var data = this.__data__;
+      if (data instanceof ListCache) {
+        var pairs = data.__data__;
+        if (!Map || (pairs.length < LARGE_ARRAY_SIZE - 1)) {
+          pairs.push([key, value]);
+          this.size = ++data.size;
+          return this;
+        }
+        data = this.__data__ = new MapCache(pairs);
       }
-      cache.set(key, value);
+      data.set(key, value);
+      this.size = data.size;
       return this;
     }
 
@@ -4567,6 +4906,76 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
     Stack.prototype.set = stackSet;
 
     /*------------------------------------------------------------------------*/
+
+    /**
+     * Creates an array of the enumerable property names of the array-like `value`.
+     *
+     * @private
+     * @param {*} value The value to query.
+     * @param {boolean} inherited Specify returning inherited property names.
+     * @returns {Array} Returns the array of property names.
+     */
+    function arrayLikeKeys(value, inherited) {
+      var isArr = isArray(value),
+          isArg = !isArr && isArguments(value),
+          isBuff = !isArr && !isArg && isBuffer(value),
+          isType = !isArr && !isArg && !isBuff && isTypedArray(value),
+          skipIndexes = isArr || isArg || isBuff || isType,
+          result = skipIndexes ? baseTimes(value.length, String) : [],
+          length = result.length;
+
+      for (var key in value) {
+        if ((inherited || hasOwnProperty.call(value, key)) &&
+            !(skipIndexes && (
+               // Safari 9 has enumerable `arguments.length` in strict mode.
+               key == 'length' ||
+               // Node.js 0.10 has enumerable non-index properties on buffers.
+               (isBuff && (key == 'offset' || key == 'parent')) ||
+               // PhantomJS 2 has enumerable non-index properties on typed arrays.
+               (isType && (key == 'buffer' || key == 'byteLength' || key == 'byteOffset')) ||
+               // Skip index properties.
+               isIndex(key, length)
+            ))) {
+          result.push(key);
+        }
+      }
+      return result;
+    }
+
+    /**
+     * A specialized version of `_.sample` for arrays.
+     *
+     * @private
+     * @param {Array} array The array to sample.
+     * @returns {*} Returns the random element.
+     */
+    function arraySample(array) {
+      var length = array.length;
+      return length ? array[baseRandom(0, length - 1)] : undefined;
+    }
+
+    /**
+     * A specialized version of `_.sampleSize` for arrays.
+     *
+     * @private
+     * @param {Array} array The array to sample.
+     * @param {number} n The number of elements to sample.
+     * @returns {Array} Returns the random elements.
+     */
+    function arraySampleSize(array, n) {
+      return shuffleSelf(copyArray(array), baseClamp(n, 0, array.length));
+    }
+
+    /**
+     * A specialized version of `_.shuffle` for arrays.
+     *
+     * @private
+     * @param {Array} array The array to shuffle.
+     * @returns {Array} Returns the new shuffled array.
+     */
+    function arrayShuffle(array) {
+      return shuffleSelf(copyArray(array));
+    }
 
     /**
      * Used by `_.defaults` to customize its `_.assignIn` use.
@@ -4597,14 +5006,14 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      */
     function assignMergeValue(object, key, value) {
       if ((value !== undefined && !eq(object[key], value)) ||
-          (typeof key == 'number' && value === undefined && !(key in object))) {
-        object[key] = value;
+          (value === undefined && !(key in object))) {
+        baseAssignValue(object, key, value);
       }
     }
 
     /**
      * Assigns `value` to `key` of `object` if the existing value is not equivalent
-     * using [`SameValueZero`](http://ecma-international.org/ecma-262/6.0/#sec-samevaluezero)
+     * using [`SameValueZero`](http://ecma-international.org/ecma-262/7.0/#sec-samevaluezero)
      * for equality comparisons.
      *
      * @private
@@ -4616,7 +5025,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
       var objValue = object[key];
       if (!(hasOwnProperty.call(object, key) && eq(objValue, value)) ||
           (value === undefined && !(key in object))) {
-        object[key] = value;
+        baseAssignValue(object, key, value);
       }
     }
 
@@ -4624,7 +5033,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * Gets the index at which the `key` is found in `array` of key-value pairs.
      *
      * @private
-     * @param {Array} array The array to search.
+     * @param {Array} array The array to inspect.
      * @param {*} key The key to search for.
      * @returns {number} Returns the index of the matched value, else `-1`.
      */
@@ -4670,27 +5079,62 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
     }
 
     /**
+     * The base implementation of `_.assignIn` without support for multiple sources
+     * or `customizer` functions.
+     *
+     * @private
+     * @param {Object} object The destination object.
+     * @param {Object} source The source object.
+     * @returns {Object} Returns `object`.
+     */
+    function baseAssignIn(object, source) {
+      return object && copyObject(source, keysIn(source), object);
+    }
+
+    /**
+     * The base implementation of `assignValue` and `assignMergeValue` without
+     * value checks.
+     *
+     * @private
+     * @param {Object} object The object to modify.
+     * @param {string} key The key of the property to assign.
+     * @param {*} value The value to assign.
+     */
+    function baseAssignValue(object, key, value) {
+      if (key == '__proto__' && defineProperty) {
+        defineProperty(object, key, {
+          'configurable': true,
+          'enumerable': true,
+          'value': value,
+          'writable': true
+        });
+      } else {
+        object[key] = value;
+      }
+    }
+
+    /**
      * The base implementation of `_.at` without support for individual paths.
      *
      * @private
      * @param {Object} object The object to iterate over.
-     * @param {string[]} paths The property paths of elements to pick.
+     * @param {string[]} paths The property paths to pick.
      * @returns {Array} Returns the picked elements.
      */
     function baseAt(object, paths) {
       var index = -1,
-          isNil = object == null,
           length = paths.length,
-          result = Array(length);
+          result = Array(length),
+          skip = object == null;
 
       while (++index < length) {
-        result[index] = isNil ? undefined : get(object, paths[index]);
+        result[index] = skip ? undefined : get(object, paths[index]);
       }
       return result;
     }
 
     /**
-     * The base implementation of `_.clamp` which doesn't coerce arguments to numbers.
+     * The base implementation of `_.clamp` which doesn't coerce arguments.
      *
      * @private
      * @param {number} number The number to clamp.
@@ -4716,16 +5160,22 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      *
      * @private
      * @param {*} value The value to clone.
-     * @param {boolean} [isDeep] Specify a deep clone.
-     * @param {boolean} [isFull] Specify a clone including symbols.
+     * @param {boolean} bitmask The bitmask flags.
+     *  1 - Deep clone
+     *  2 - Flatten inherited properties
+     *  4 - Clone symbols
      * @param {Function} [customizer] The function to customize cloning.
      * @param {string} [key] The key of `value`.
      * @param {Object} [object] The parent object of `value`.
      * @param {Object} [stack] Tracks traversed objects and their clone counterparts.
      * @returns {*} Returns the cloned value.
      */
-    function baseClone(value, isDeep, isFull, customizer, key, object, stack) {
-      var result;
+    function baseClone(value, bitmask, customizer, key, object, stack) {
+      var result,
+          isDeep = bitmask & CLONE_DEEP_FLAG,
+          isFlat = bitmask & CLONE_FLAT_FLAG,
+          isFull = bitmask & CLONE_SYMBOLS_FLAG;
+
       if (customizer) {
         result = object ? customizer(value, key, object, stack) : customizer(value);
       }
@@ -4749,12 +5199,11 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
           return cloneBuffer(value, isDeep);
         }
         if (tag == objectTag || tag == argsTag || (isFunc && !object)) {
-          if (isHostObject(value)) {
-            return object ? value : {};
-          }
-          result = initCloneObject(isFunc ? {} : value);
+          result = (isFlat || isFunc) ? {} : initCloneObject(value);
           if (!isDeep) {
-            return copySymbols(value, baseAssign(result, value));
+            return isFlat
+              ? copySymbolsIn(value, baseAssignIn(result, value))
+              : copySymbols(value, baseAssign(result, value));
           }
         } else {
           if (!cloneableTags[tag]) {
@@ -4771,16 +5220,18 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
       }
       stack.set(value, result);
 
-      if (!isArr) {
-        var props = isFull ? getAllKeys(value) : keys(value);
-      }
-      // Recursively populate clone (susceptible to call stack limits).
+      var keysFunc = isFull
+        ? (isFlat ? getAllKeysIn : getAllKeys)
+        : (isFlat ? keysIn : keys);
+
+      var props = isArr ? undefined : keysFunc(value);
       arrayEach(props || value, function(subValue, key) {
         if (props) {
           key = subValue;
           subValue = value[key];
         }
-        assignValue(result, key, baseClone(subValue, isDeep, isFull, customizer, key, value, stack));
+        // Recursively populate clone (susceptible to call stack limits).
+        assignValue(result, key, baseClone(subValue, bitmask, customizer, key, value, stack));
       });
       return result;
     }
@@ -4793,49 +5244,47 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @returns {Function} Returns the new spec function.
      */
     function baseConforms(source) {
-      var props = keys(source),
-          length = props.length;
-
+      var props = keys(source);
       return function(object) {
-        if (object == null) {
-          return !length;
-        }
-        var index = length;
-        while (index--) {
-          var key = props[index],
-              predicate = source[key],
-              value = object[key];
-
-          if ((value === undefined &&
-              !(key in Object(object))) || !predicate(value)) {
-            return false;
-          }
-        }
-        return true;
+        return baseConformsTo(object, source, props);
       };
     }
 
     /**
-     * The base implementation of `_.create` without support for assigning
-     * properties to the created object.
+     * The base implementation of `_.conformsTo` which accepts `props` to check.
      *
      * @private
-     * @param {Object} prototype The object to inherit from.
-     * @returns {Object} Returns the new object.
+     * @param {Object} object The object to inspect.
+     * @param {Object} source The object of property predicates to conform to.
+     * @returns {boolean} Returns `true` if `object` conforms, else `false`.
      */
-    function baseCreate(proto) {
-      return isObject(proto) ? objectCreate(proto) : {};
+    function baseConformsTo(object, source, props) {
+      var length = props.length;
+      if (object == null) {
+        return !length;
+      }
+      object = Object(object);
+      while (length--) {
+        var key = props[length],
+            predicate = source[key],
+            value = object[key];
+
+        if ((value === undefined && !(key in object)) || !predicate(value)) {
+          return false;
+        }
+      }
+      return true;
     }
 
     /**
-     * The base implementation of `_.delay` and `_.defer` which accepts an array
-     * of `func` arguments.
+     * The base implementation of `_.delay` and `_.defer` which accepts `args`
+     * to provide to `func`.
      *
      * @private
      * @param {Function} func The function to delay.
      * @param {number} wait The number of milliseconds to delay invocation.
-     * @param {Object} args The arguments to provide to `func`.
-     * @returns {number} Returns the timer id.
+     * @param {Array} args The arguments to provide to `func`.
+     * @returns {number|Object} Returns the timer id or timeout object.
      */
     function baseDelay(func, wait, args) {
       if (typeof func != 'function') {
@@ -4881,7 +5330,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
       outer:
       while (++index < length) {
         var value = array[index],
-            computed = iteratee ? iteratee(value) : value;
+            computed = iteratee == null ? value : iteratee(value);
 
         value = (comparator || value !== 0) ? value : 0;
         if (isCommon && computed === computed) {
@@ -5120,7 +5569,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @returns {*} Returns the resolved value.
      */
     function baseGet(object, path) {
-      path = isKey(path, object) ? [path] : castPath(path);
+      path = castPath(path, object);
 
       var index = 0,
           length = path.length;
@@ -5148,7 +5597,24 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
     }
 
     /**
-     * The base implementation of `_.gt` which doesn't coerce arguments to numbers.
+     * The base implementation of `getTag` without fallbacks for buggy environments.
+     *
+     * @private
+     * @param {*} value The value to query.
+     * @returns {string} Returns the `toStringTag`.
+     */
+    function baseGetTag(value) {
+      if (value == null) {
+        return value === undefined ? undefinedTag : nullTag;
+      }
+      value = Object(value);
+      return (symToStringTag && symToStringTag in value)
+        ? getRawTag(value)
+        : objectToString(value);
+    }
+
+    /**
+     * The base implementation of `_.gt` which doesn't coerce arguments.
      *
      * @private
      * @param {*} value The value to compare.
@@ -5169,12 +5635,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @returns {boolean} Returns `true` if `key` exists, else `false`.
      */
     function baseHas(object, key) {
-      // Avoid a bug in IE 10-11 where objects with a [[Prototype]] of `null`,
-      // that are composed entirely of index properties, return `false` for
-      // `hasOwnProperty` checks of them.
-      return object != null &&
-        (hasOwnProperty.call(object, key) ||
-          (typeof object == 'object' && key in object && getPrototype(object) === null));
+      return object != null && hasOwnProperty.call(object, key);
     }
 
     /**
@@ -5190,7 +5651,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
     }
 
     /**
-     * The base implementation of `_.inRange` which doesn't coerce arguments to numbers.
+     * The base implementation of `_.inRange` which doesn't coerce arguments.
      *
      * @private
      * @param {number} number The number to check.
@@ -5294,13 +5755,43 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @returns {*} Returns the result of the invoked method.
      */
     function baseInvoke(object, path, args) {
-      if (!isKey(path, object)) {
-        path = castPath(path);
-        object = parent(object, path);
-        path = last(path);
-      }
-      var func = object == null ? object : object[toKey(path)];
+      path = castPath(path, object);
+      object = parent(object, path);
+      var func = object == null ? object : object[toKey(last(path))];
       return func == null ? undefined : apply(func, object, args);
+    }
+
+    /**
+     * The base implementation of `_.isArguments`.
+     *
+     * @private
+     * @param {*} value The value to check.
+     * @returns {boolean} Returns `true` if `value` is an `arguments` object,
+     */
+    function baseIsArguments(value) {
+      return isObjectLike(value) && baseGetTag(value) == argsTag;
+    }
+
+    /**
+     * The base implementation of `_.isArrayBuffer` without Node.js optimizations.
+     *
+     * @private
+     * @param {*} value The value to check.
+     * @returns {boolean} Returns `true` if `value` is an array buffer, else `false`.
+     */
+    function baseIsArrayBuffer(value) {
+      return isObjectLike(value) && baseGetTag(value) == arrayBufferTag;
+    }
+
+    /**
+     * The base implementation of `_.isDate` without Node.js optimizations.
+     *
+     * @private
+     * @param {*} value The value to check.
+     * @returns {boolean} Returns `true` if `value` is a date object, else `false`.
+     */
+    function baseIsDate(value) {
+      return isObjectLike(value) && baseGetTag(value) == dateTag;
     }
 
     /**
@@ -5310,22 +5801,21 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @private
      * @param {*} value The value to compare.
      * @param {*} other The other value to compare.
+     * @param {boolean} bitmask The bitmask flags.
+     *  1 - Unordered comparison
+     *  2 - Partial comparison
      * @param {Function} [customizer] The function to customize comparisons.
-     * @param {boolean} [bitmask] The bitmask of comparison flags.
-     *  The bitmask may be composed of the following flags:
-     *     1 - Unordered comparison
-     *     2 - Partial comparison
      * @param {Object} [stack] Tracks traversed `value` and `other` objects.
      * @returns {boolean} Returns `true` if the values are equivalent, else `false`.
      */
-    function baseIsEqual(value, other, customizer, bitmask, stack) {
+    function baseIsEqual(value, other, bitmask, customizer, stack) {
       if (value === other) {
         return true;
       }
       if (value == null || other == null || (!isObject(value) && !isObjectLike(other))) {
         return value !== value && other !== other;
       }
-      return baseIsEqualDeep(value, other, baseIsEqual, customizer, bitmask, stack);
+      return baseIsEqualDeep(value, other, bitmask, customizer, baseIsEqual, stack);
     }
 
     /**
@@ -5336,14 +5826,13 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @private
      * @param {Object} object The object to compare.
      * @param {Object} other The other object to compare.
+     * @param {number} bitmask The bitmask flags. See `baseIsEqual` for more details.
+     * @param {Function} customizer The function to customize comparisons.
      * @param {Function} equalFunc The function to determine equivalents of values.
-     * @param {Function} [customizer] The function to customize comparisons.
-     * @param {number} [bitmask] The bitmask of comparison flags. See `baseIsEqual`
-     *  for more details.
      * @param {Object} [stack] Tracks traversed `object` and `other` objects.
      * @returns {boolean} Returns `true` if the objects are equivalent, else `false`.
      */
-    function baseIsEqualDeep(object, other, equalFunc, customizer, bitmask, stack) {
+    function baseIsEqualDeep(object, other, bitmask, customizer, equalFunc, stack) {
       var objIsArr = isArray(object),
           othIsArr = isArray(other),
           objTag = arrayTag,
@@ -5357,17 +5846,24 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
         othTag = getTag(other);
         othTag = othTag == argsTag ? objectTag : othTag;
       }
-      var objIsObj = objTag == objectTag && !isHostObject(object),
-          othIsObj = othTag == objectTag && !isHostObject(other),
+      var objIsObj = objTag == objectTag,
+          othIsObj = othTag == objectTag,
           isSameTag = objTag == othTag;
 
+      if (isSameTag && isBuffer(object)) {
+        if (!isBuffer(other)) {
+          return false;
+        }
+        objIsArr = true;
+        objIsObj = false;
+      }
       if (isSameTag && !objIsObj) {
         stack || (stack = new Stack);
         return (objIsArr || isTypedArray(object))
-          ? equalArrays(object, other, equalFunc, customizer, bitmask, stack)
-          : equalByTag(object, other, objTag, equalFunc, customizer, bitmask, stack);
+          ? equalArrays(object, other, bitmask, customizer, equalFunc, stack)
+          : equalByTag(object, other, objTag, bitmask, customizer, equalFunc, stack);
       }
-      if (!(bitmask & PARTIAL_COMPARE_FLAG)) {
+      if (!(bitmask & COMPARE_PARTIAL_FLAG)) {
         var objIsWrapped = objIsObj && hasOwnProperty.call(object, '__wrapped__'),
             othIsWrapped = othIsObj && hasOwnProperty.call(other, '__wrapped__');
 
@@ -5376,14 +5872,25 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
               othUnwrapped = othIsWrapped ? other.value() : other;
 
           stack || (stack = new Stack);
-          return equalFunc(objUnwrapped, othUnwrapped, customizer, bitmask, stack);
+          return equalFunc(objUnwrapped, othUnwrapped, bitmask, customizer, stack);
         }
       }
       if (!isSameTag) {
         return false;
       }
       stack || (stack = new Stack);
-      return equalObjects(object, other, equalFunc, customizer, bitmask, stack);
+      return equalObjects(object, other, bitmask, customizer, equalFunc, stack);
+    }
+
+    /**
+     * The base implementation of `_.isMap` without Node.js optimizations.
+     *
+     * @private
+     * @param {*} value The value to check.
+     * @returns {boolean} Returns `true` if `value` is a map, else `false`.
+     */
+    function baseIsMap(value) {
+      return isObjectLike(value) && getTag(value) == mapTag;
     }
 
     /**
@@ -5430,7 +5937,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
             var result = customizer(objValue, srcValue, key, object, source, stack);
           }
           if (!(result === undefined
-                ? baseIsEqual(srcValue, objValue, customizer, UNORDERED_COMPARE_FLAG | PARTIAL_COMPARE_FLAG, stack)
+                ? baseIsEqual(srcValue, objValue, COMPARE_PARTIAL_FLAG | COMPARE_UNORDERED_FLAG, customizer, stack)
                 : result
               )) {
             return false;
@@ -5452,8 +5959,42 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
       if (!isObject(value) || isMasked(value)) {
         return false;
       }
-      var pattern = (isFunction(value) || isHostObject(value)) ? reIsNative : reIsHostCtor;
+      var pattern = isFunction(value) ? reIsNative : reIsHostCtor;
       return pattern.test(toSource(value));
+    }
+
+    /**
+     * The base implementation of `_.isRegExp` without Node.js optimizations.
+     *
+     * @private
+     * @param {*} value The value to check.
+     * @returns {boolean} Returns `true` if `value` is a regexp, else `false`.
+     */
+    function baseIsRegExp(value) {
+      return isObjectLike(value) && baseGetTag(value) == regexpTag;
+    }
+
+    /**
+     * The base implementation of `_.isSet` without Node.js optimizations.
+     *
+     * @private
+     * @param {*} value The value to check.
+     * @returns {boolean} Returns `true` if `value` is a set, else `false`.
+     */
+    function baseIsSet(value) {
+      return isObjectLike(value) && getTag(value) == setTag;
+    }
+
+    /**
+     * The base implementation of `_.isTypedArray` without Node.js optimizations.
+     *
+     * @private
+     * @param {*} value The value to check.
+     * @returns {boolean} Returns `true` if `value` is a typed array, else `false`.
+     */
+    function baseIsTypedArray(value) {
+      return isObjectLike(value) &&
+        isLength(value.length) && !!typedArrayTags[baseGetTag(value)];
     }
 
     /**
@@ -5481,44 +6022,49 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
     }
 
     /**
-     * The base implementation of `_.keys` which doesn't skip the constructor
-     * property of prototypes or treat sparse arrays as dense.
+     * The base implementation of `_.keys` which doesn't treat sparse arrays as dense.
      *
      * @private
      * @param {Object} object The object to query.
      * @returns {Array} Returns the array of property names.
      */
     function baseKeys(object) {
-      return nativeKeys(Object(object));
+      if (!isPrototype(object)) {
+        return nativeKeys(object);
+      }
+      var result = [];
+      for (var key in Object(object)) {
+        if (hasOwnProperty.call(object, key) && key != 'constructor') {
+          result.push(key);
+        }
+      }
+      return result;
     }
 
     /**
-     * The base implementation of `_.keysIn` which doesn't skip the constructor
-     * property of prototypes or treat sparse arrays as dense.
+     * The base implementation of `_.keysIn` which doesn't treat sparse arrays as dense.
      *
      * @private
      * @param {Object} object The object to query.
      * @returns {Array} Returns the array of property names.
      */
     function baseKeysIn(object) {
-      object = object == null ? object : Object(object);
+      if (!isObject(object)) {
+        return nativeKeysIn(object);
+      }
+      var isProto = isPrototype(object),
+          result = [];
 
-      var result = [];
       for (var key in object) {
-        result.push(key);
+        if (!(key == 'constructor' && (isProto || !hasOwnProperty.call(object, key)))) {
+          result.push(key);
+        }
       }
       return result;
     }
 
-    // Fallback for IE < 9 with es6-shim.
-    if (enumerate && !propertyIsEnumerable.call({ 'valueOf': 1 }, 'valueOf')) {
-      baseKeysIn = function(object) {
-        return iteratorToArray(enumerate(object));
-      };
-    }
-
     /**
-     * The base implementation of `_.lt` which doesn't coerce arguments to numbers.
+     * The base implementation of `_.lt` which doesn't coerce arguments.
      *
      * @private
      * @param {*} value The value to compare.
@@ -5581,7 +6127,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
         var objValue = get(object, path);
         return (objValue === undefined && objValue === srcValue)
           ? hasIn(object, path)
-          : baseIsEqual(srcValue, objValue, undefined, UNORDERED_COMPARE_FLAG | PARTIAL_COMPARE_FLAG);
+          : baseIsEqual(srcValue, objValue, COMPARE_PARTIAL_FLAG | COMPARE_UNORDERED_FLAG);
       };
     }
 
@@ -5600,14 +6146,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
       if (object === source) {
         return;
       }
-      if (!(isArray(source) || isTypedArray(source))) {
-        var props = keysIn(source);
-      }
-      arrayEach(props || source, function(srcValue, key) {
-        if (props) {
-          key = srcValue;
-          srcValue = source[key];
-        }
+      baseFor(source, function(srcValue, key) {
         if (isObject(srcValue)) {
           stack || (stack = new Stack);
           baseMergeDeep(object, source, key, srcIndex, baseMerge, customizer, stack);
@@ -5622,7 +6161,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
           }
           assignMergeValue(object, key, newValue);
         }
-      });
+      }, keysIn);
     }
 
     /**
@@ -5656,47 +6195,54 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
       var isCommon = newValue === undefined;
 
       if (isCommon) {
+        var isArr = isArray(srcValue),
+            isBuff = !isArr && isBuffer(srcValue),
+            isTyped = !isArr && !isBuff && isTypedArray(srcValue);
+
         newValue = srcValue;
-        if (isArray(srcValue) || isTypedArray(srcValue)) {
+        if (isArr || isBuff || isTyped) {
           if (isArray(objValue)) {
             newValue = objValue;
           }
           else if (isArrayLikeObject(objValue)) {
             newValue = copyArray(objValue);
           }
-          else {
+          else if (isBuff) {
             isCommon = false;
-            newValue = baseClone(srcValue, true);
+            newValue = cloneBuffer(srcValue, true);
+          }
+          else if (isTyped) {
+            isCommon = false;
+            newValue = cloneTypedArray(srcValue, true);
+          }
+          else {
+            newValue = [];
           }
         }
         else if (isPlainObject(srcValue) || isArguments(srcValue)) {
+          newValue = objValue;
           if (isArguments(objValue)) {
             newValue = toPlainObject(objValue);
           }
           else if (!isObject(objValue) || (srcIndex && isFunction(objValue))) {
-            isCommon = false;
-            newValue = baseClone(srcValue, true);
-          }
-          else {
-            newValue = objValue;
+            newValue = initCloneObject(srcValue);
           }
         }
         else {
           isCommon = false;
         }
       }
-      stack.set(srcValue, newValue);
-
       if (isCommon) {
         // Recursively merge objects and arrays (susceptible to call stack limits).
+        stack.set(srcValue, newValue);
         mergeFunc(newValue, srcValue, srcIndex, customizer, stack);
+        stack['delete'](srcValue);
       }
-      stack['delete'](srcValue);
       assignMergeValue(object, key, newValue);
     }
 
     /**
-     * The base implementation of `_.nth` which doesn't coerce `n` to an integer.
+     * The base implementation of `_.nth` which doesn't coerce arguments.
      *
      * @private
      * @param {Array} array The array to query.
@@ -5743,17 +6289,14 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      *
      * @private
      * @param {Object} object The source object.
-     * @param {string[]} props The property identifiers to pick.
+     * @param {string[]} paths The property paths to pick.
      * @returns {Object} Returns the new object.
      */
-    function basePick(object, props) {
+    function basePick(object, paths) {
       object = Object(object);
-      return arrayReduce(props, function(result, key) {
-        if (key in object) {
-          result[key] = object[key];
-        }
-        return result;
-      }, {});
+      return basePickBy(object, paths, function(value, path) {
+        return hasIn(object, path);
+      });
     }
 
     /**
@@ -5761,37 +6304,24 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      *
      * @private
      * @param {Object} object The source object.
+     * @param {string[]} paths The property paths to pick.
      * @param {Function} predicate The function invoked per property.
      * @returns {Object} Returns the new object.
      */
-    function basePickBy(object, predicate) {
+    function basePickBy(object, paths, predicate) {
       var index = -1,
-          props = getAllKeysIn(object),
-          length = props.length,
+          length = paths.length,
           result = {};
 
       while (++index < length) {
-        var key = props[index],
-            value = object[key];
+        var path = paths[index],
+            value = baseGet(object, path);
 
-        if (predicate(value, key)) {
-          result[key] = value;
+        if (predicate(value, path)) {
+          baseSet(result, castPath(path, object), value);
         }
       }
       return result;
-    }
-
-    /**
-     * The base implementation of `_.property` without support for deep paths.
-     *
-     * @private
-     * @param {string} key The key of the property to get.
-     * @returns {Function} Returns the new accessor function.
-     */
-    function baseProperty(key) {
-      return function(object) {
-        return object == null ? undefined : object[key];
-      };
     }
 
     /**
@@ -5864,17 +6394,8 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
           var previous = index;
           if (isIndex(index)) {
             splice.call(array, index, 1);
-          }
-          else if (!isKey(index, array)) {
-            var path = castPath(index),
-                object = parent(array, path);
-
-            if (object != null) {
-              delete object[toKey(last(path))];
-            }
-          }
-          else {
-            delete array[toKey(index)];
+          } else {
+            baseUnset(array, index);
           }
         }
       }
@@ -5896,7 +6417,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
 
     /**
      * The base implementation of `_.range` and `_.rangeRight` which doesn't
-     * coerce arguments to numbers.
+     * coerce arguments.
      *
      * @private
      * @param {number} start The start of the range.
@@ -5946,17 +6467,56 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
     }
 
     /**
+     * The base implementation of `_.rest` which doesn't validate or coerce arguments.
+     *
+     * @private
+     * @param {Function} func The function to apply a rest parameter to.
+     * @param {number} [start=func.length-1] The start position of the rest parameter.
+     * @returns {Function} Returns the new function.
+     */
+    function baseRest(func, start) {
+      return setToString(overRest(func, start, identity), func + '');
+    }
+
+    /**
+     * The base implementation of `_.sample`.
+     *
+     * @private
+     * @param {Array|Object} collection The collection to sample.
+     * @returns {*} Returns the random element.
+     */
+    function baseSample(collection) {
+      return arraySample(values(collection));
+    }
+
+    /**
+     * The base implementation of `_.sampleSize` without param guards.
+     *
+     * @private
+     * @param {Array|Object} collection The collection to sample.
+     * @param {number} n The number of elements to sample.
+     * @returns {Array} Returns the random elements.
+     */
+    function baseSampleSize(collection, n) {
+      var array = values(collection);
+      return shuffleSelf(array, baseClamp(n, 0, array.length));
+    }
+
+    /**
      * The base implementation of `_.set`.
      *
      * @private
-     * @param {Object} object The object to query.
+     * @param {Object} object The object to modify.
      * @param {Array|string} path The path of the property to set.
      * @param {*} value The value to set.
      * @param {Function} [customizer] The function to customize path creation.
      * @returns {Object} Returns `object`.
      */
     function baseSet(object, path, value, customizer) {
-      path = isKey(path, object) ? [path] : castPath(path);
+      if (!isObject(object)) {
+        return object;
+      }
+      path = castPath(path, object);
 
       var index = -1,
           length = path.length,
@@ -5964,27 +6524,26 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
           nested = object;
 
       while (nested != null && ++index < length) {
-        var key = toKey(path[index]);
-        if (isObject(nested)) {
-          var newValue = value;
-          if (index != lastIndex) {
-            var objValue = nested[key];
-            newValue = customizer ? customizer(objValue, key, nested) : undefined;
-            if (newValue === undefined) {
-              newValue = objValue == null
-                ? (isIndex(path[index + 1]) ? [] : {})
-                : objValue;
-            }
+        var key = toKey(path[index]),
+            newValue = value;
+
+        if (index != lastIndex) {
+          var objValue = nested[key];
+          newValue = customizer ? customizer(objValue, key, nested) : undefined;
+          if (newValue === undefined) {
+            newValue = isObject(objValue)
+              ? objValue
+              : (isIndex(path[index + 1]) ? [] : {});
           }
-          assignValue(nested, key, newValue);
         }
+        assignValue(nested, key, newValue);
         nested = nested[key];
       }
       return object;
     }
 
     /**
-     * The base implementation of `setData` without support for hot loop detection.
+     * The base implementation of `setData` without support for hot loop shorting.
      *
      * @private
      * @param {Function} func The function to associate metadata with.
@@ -5995,6 +6554,34 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
       metaMap.set(func, data);
       return func;
     };
+
+    /**
+     * The base implementation of `setToString` without support for hot loop shorting.
+     *
+     * @private
+     * @param {Function} func The function to modify.
+     * @param {Function} string The `toString` result.
+     * @returns {Function} Returns `func`.
+     */
+    var baseSetToString = !defineProperty ? identity : function(func, string) {
+      return defineProperty(func, 'toString', {
+        'configurable': true,
+        'enumerable': false,
+        'value': constant(string),
+        'writable': true
+      });
+    };
+
+    /**
+     * The base implementation of `_.shuffle`.
+     *
+     * @private
+     * @param {Array|Object} collection The collection to shuffle.
+     * @returns {Array} Returns the new shuffled array.
+     */
+    function baseShuffle(collection) {
+      return shuffleSelf(values(collection));
+    }
 
     /**
      * The base implementation of `_.slice` without an iteratee call guard.
@@ -6059,7 +6646,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      */
     function baseSortedIndex(array, value, retHighest) {
       var low = 0,
-          high = array ? array.length : low;
+          high = array == null ? low : array.length;
 
       if (typeof value == 'number' && value === value && high <= HALF_MAX_ARRAY_LENGTH) {
         while (low < high) {
@@ -6095,7 +6682,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
       value = iteratee(value);
 
       var low = 0,
-          high = array ? array.length : 0,
+          high = array == null ? 0 : array.length,
           valIsNaN = value !== value,
           valIsNull = value === null,
           valIsSymbol = isSymbol(value),
@@ -6189,6 +6776,10 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
       if (typeof value == 'string') {
         return value;
       }
+      if (isArray(value)) {
+        // Recursively convert values (susceptible to call stack limits).
+        return arrayMap(value, baseToString) + '';
+      }
       if (isSymbol(value)) {
         return symbolToString ? symbolToString.call(value) : '';
       }
@@ -6262,22 +6853,20 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      *
      * @private
      * @param {Object} object The object to modify.
-     * @param {Array|string} path The path of the property to unset.
+     * @param {Array|string} path The property path to unset.
      * @returns {boolean} Returns `true` if the property is deleted, else `false`.
      */
     function baseUnset(object, path) {
-      path = isKey(path, object) ? [path] : castPath(path);
+      path = castPath(path, object);
       object = parent(object, path);
-
-      var key = toKey(last(path));
-      return !(object != null && baseHas(object, key)) || delete object[key];
+      return object == null || delete object[toKey(last(path))];
     }
 
     /**
      * The base implementation of `_.update`.
      *
      * @private
-     * @param {Object} object The object to query.
+     * @param {Object} object The object to modify.
      * @param {Array|string} path The path of the property to update.
      * @param {Function} updater The function to produce the updated value.
      * @param {Function} [customizer] The function to customize path creation.
@@ -6341,18 +6930,24 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @returns {Array} Returns the new array of values.
      */
     function baseXor(arrays, iteratee, comparator) {
+      var length = arrays.length;
+      if (length < 2) {
+        return length ? baseUniq(arrays[0]) : [];
+      }
       var index = -1,
-          length = arrays.length;
+          result = Array(length);
 
       while (++index < length) {
-        var result = result
-          ? arrayPush(
-              baseDifference(result, arrays[index], iteratee, comparator),
-              baseDifference(arrays[index], result, iteratee, comparator)
-            )
-          : arrays[index];
+        var array = arrays[index],
+            othIndex = -1;
+
+        while (++othIndex < length) {
+          if (othIndex != index) {
+            result[index] = baseDifference(result[index] || array, arrays[othIndex], iteratee, comparator);
+          }
+        }
       }
-      return (result && result.length) ? baseUniq(result, iteratee, comparator) : [];
+      return baseUniq(baseFlatten(result, 1), iteratee, comparator);
     }
 
     /**
@@ -6404,11 +6999,26 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      *
      * @private
      * @param {*} value The value to inspect.
+     * @param {Object} [object] The object to query keys on.
      * @returns {Array} Returns the cast property path array.
      */
-    function castPath(value) {
-      return isArray(value) ? value : stringToPath(value);
+    function castPath(value, object) {
+      if (isArray(value)) {
+        return value;
+      }
+      return isKey(value, object) ? [value] : stringToPath(toString(value));
     }
+
+    /**
+     * A `baseRest` alias which can be replaced with `identity` by module
+     * replacement plugins.
+     *
+     * @private
+     * @type {Function}
+     * @param {Function} func The function to apply a rest parameter to.
+     * @returns {Function} Returns the new function.
+     */
+    var castRest = baseRest;
 
     /**
      * Casts `array` to a slice if it's needed.
@@ -6426,6 +7036,16 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
     }
 
     /**
+     * A simple wrapper around the global [`clearTimeout`](https://mdn.io/clearTimeout).
+     *
+     * @private
+     * @param {number|Object} id The timer id or timeout object of the timer to clear.
+     */
+    var clearTimeout = ctxClearTimeout || function(id) {
+      return root.clearTimeout(id);
+    };
+
+    /**
      * Creates a clone of  `buffer`.
      *
      * @private
@@ -6437,7 +7057,9 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
       if (isDeep) {
         return buffer.slice();
       }
-      var result = new buffer.constructor(buffer.length);
+      var length = buffer.length,
+          result = allocUnsafe ? allocUnsafe(length) : new buffer.constructor(length);
+
       buffer.copy(result);
       return result;
     }
@@ -6478,7 +7100,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @returns {Object} Returns the cloned map.
      */
     function cloneMap(map, isDeep, cloneFunc) {
-      var array = isDeep ? cloneFunc(mapToArray(map), true) : mapToArray(map);
+      var array = isDeep ? cloneFunc(mapToArray(map), CLONE_DEEP_FLAG) : mapToArray(map);
       return arrayReduce(array, addMapEntry, new map.constructor);
     }
 
@@ -6505,7 +7127,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @returns {Object} Returns the cloned set.
      */
     function cloneSet(set, isDeep, cloneFunc) {
-      var array = isDeep ? cloneFunc(setToArray(set), true) : setToArray(set);
+      var array = isDeep ? cloneFunc(setToArray(set), CLONE_DEEP_FLAG) : setToArray(set);
       return arrayReduce(array, addSetEntry, new set.constructor);
     }
 
@@ -6714,6 +7336,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @returns {Object} Returns `object`.
      */
     function copyObject(source, props, object, customizer) {
+      var isNew = !object;
       object || (object = {});
 
       var index = -1,
@@ -6724,15 +7347,22 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
 
         var newValue = customizer
           ? customizer(object[key], source[key], key, object, source)
-          : source[key];
+          : undefined;
 
-        assignValue(object, key, newValue);
+        if (newValue === undefined) {
+          newValue = source[key];
+        }
+        if (isNew) {
+          baseAssignValue(object, key, newValue);
+        } else {
+          assignValue(object, key, newValue);
+        }
       }
       return object;
     }
 
     /**
-     * Copies own symbol properties of `source` to `object`.
+     * Copies own symbols of `source` to `object`.
      *
      * @private
      * @param {Object} source The object to copy symbols from.
@@ -6741,6 +7371,18 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      */
     function copySymbols(source, object) {
       return copyObject(source, getSymbols(source), object);
+    }
+
+    /**
+     * Copies own and inherited symbols of `source` to `object`.
+     *
+     * @private
+     * @param {Object} source The object to copy symbols from.
+     * @param {Object} [object={}] The object to copy symbols to.
+     * @returns {Object} Returns `object`.
+     */
+    function copySymbolsIn(source, object) {
+      return copyObject(source, getSymbolsIn(source), object);
     }
 
     /**
@@ -6756,7 +7398,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
         var func = isArray(collection) ? arrayAggregator : baseAggregator,
             accumulator = initializer ? initializer() : {};
 
-        return func(collection, setter, getIteratee(iteratee), accumulator);
+        return func(collection, setter, getIteratee(iteratee, 2), accumulator);
       };
     }
 
@@ -6768,7 +7410,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @returns {Function} Returns the new assigner function.
      */
     function createAssigner(assigner) {
-      return rest(function(object, sources) {
+      return baseRest(function(object, sources) {
         var index = -1,
             length = sources.length,
             customizer = length > 1 ? sources[length - 1] : undefined,
@@ -6852,14 +7494,13 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      *
      * @private
      * @param {Function} func The function to wrap.
-     * @param {number} bitmask The bitmask of wrapper flags. See `createWrapper`
-     *  for more details.
+     * @param {number} bitmask The bitmask flags. See `createWrap` for more details.
      * @param {*} [thisArg] The `this` binding of `func`.
      * @returns {Function} Returns the new wrapped function.
      */
-    function createBaseWrapper(func, bitmask, thisArg) {
-      var isBind = bitmask & BIND_FLAG,
-          Ctor = createCtorWrapper(func);
+    function createBind(func, bitmask, thisArg) {
+      var isBind = bitmask & WRAP_BIND_FLAG,
+          Ctor = createCtor(func);
 
       function wrapper() {
         var fn = (this && this !== root && this instanceof wrapper) ? Ctor : func;
@@ -6879,7 +7520,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
       return function(string) {
         string = toString(string);
 
-        var strSymbols = reHasComplexSymbol.test(string)
+        var strSymbols = hasUnicode(string)
           ? stringToArray(string)
           : undefined;
 
@@ -6916,10 +7557,10 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @param {Function} Ctor The constructor to wrap.
      * @returns {Function} Returns the new wrapped function.
      */
-    function createCtorWrapper(Ctor) {
+    function createCtor(Ctor) {
       return function() {
         // Use a `switch` statement to work with class constructors. See
-        // http://ecma-international.org/ecma-262/6.0/#sec-ecmascript-function-objects-call-thisargument-argumentslist
+        // http://ecma-international.org/ecma-262/7.0/#sec-ecmascript-function-objects-call-thisargument-argumentslist
         // for more details.
         var args = arguments;
         switch (args.length) {
@@ -6946,13 +7587,12 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      *
      * @private
      * @param {Function} func The function to wrap.
-     * @param {number} bitmask The bitmask of wrapper flags. See `createWrapper`
-     *  for more details.
+     * @param {number} bitmask The bitmask flags. See `createWrap` for more details.
      * @param {number} arity The arity of `func`.
      * @returns {Function} Returns the new wrapped function.
      */
-    function createCurryWrapper(func, bitmask, arity) {
-      var Ctor = createCtorWrapper(func);
+    function createCurry(func, bitmask, arity) {
+      var Ctor = createCtor(func);
 
       function wrapper() {
         var length = arguments.length,
@@ -6969,8 +7609,8 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
 
         length -= holders.length;
         if (length < arity) {
-          return createRecurryWrapper(
-            func, bitmask, createHybridWrapper, wrapper.placeholder, undefined,
+          return createRecurry(
+            func, bitmask, createHybrid, wrapper.placeholder, undefined,
             args, holders, undefined, undefined, arity - length);
         }
         var fn = (this && this !== root && this instanceof wrapper) ? Ctor : func;
@@ -6989,18 +7629,13 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
     function createFind(findIndexFunc) {
       return function(collection, predicate, fromIndex) {
         var iterable = Object(collection);
-        predicate = getIteratee(predicate, 3);
         if (!isArrayLike(collection)) {
-          var props = keys(collection);
+          var iteratee = getIteratee(predicate, 3);
+          collection = keys(collection);
+          predicate = function(key) { return iteratee(iterable[key], key, iterable); };
         }
-        var index = findIndexFunc(props || collection, function(value, key) {
-          if (props) {
-            key = value;
-            value = iterable[key];
-          }
-          return predicate(value, key, iterable);
-        }, fromIndex);
-        return index > -1 ? collection[props ? props[index] : index] : undefined;
+        var index = findIndexFunc(collection, predicate, fromIndex);
+        return index > -1 ? iterable[iteratee ? collection[index] : index] : undefined;
       };
     }
 
@@ -7012,9 +7647,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @returns {Function} Returns the new flow function.
      */
     function createFlow(fromRight) {
-      return rest(function(funcs) {
-        funcs = baseFlatten(funcs, 1);
-
+      return flatRest(function(funcs) {
         var length = funcs.length,
             index = length,
             prereq = LodashWrapper.prototype.thru;
@@ -7039,7 +7672,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
               data = funcName == 'wrapper' ? getData(func) : undefined;
 
           if (data && isLaziable(data[0]) &&
-                data[1] == (ARY_FLAG | CURRY_FLAG | PARTIAL_FLAG | REARG_FLAG) &&
+                data[1] == (WRAP_ARY_FLAG | WRAP_CURRY_FLAG | WRAP_PARTIAL_FLAG | WRAP_REARG_FLAG) &&
                 !data[4].length && data[9] == 1
               ) {
             wrapper = wrapper[getFuncName(data[0])].apply(wrapper, data[3]);
@@ -7074,8 +7707,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      *
      * @private
      * @param {Function|string} func The function or method name to wrap.
-     * @param {number} bitmask The bitmask of wrapper flags. See `createWrapper`
-     *  for more details.
+     * @param {number} bitmask The bitmask flags. See `createWrap` for more details.
      * @param {*} [thisArg] The `this` binding of `func`.
      * @param {Array} [partials] The arguments to prepend to those provided to
      *  the new function.
@@ -7088,13 +7720,13 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @param {number} [arity] The arity of `func`.
      * @returns {Function} Returns the new wrapped function.
      */
-    function createHybridWrapper(func, bitmask, thisArg, partials, holders, partialsRight, holdersRight, argPos, ary, arity) {
-      var isAry = bitmask & ARY_FLAG,
-          isBind = bitmask & BIND_FLAG,
-          isBindKey = bitmask & BIND_KEY_FLAG,
-          isCurried = bitmask & (CURRY_FLAG | CURRY_RIGHT_FLAG),
-          isFlip = bitmask & FLIP_FLAG,
-          Ctor = isBindKey ? undefined : createCtorWrapper(func);
+    function createHybrid(func, bitmask, thisArg, partials, holders, partialsRight, holdersRight, argPos, ary, arity) {
+      var isAry = bitmask & WRAP_ARY_FLAG,
+          isBind = bitmask & WRAP_BIND_FLAG,
+          isBindKey = bitmask & WRAP_BIND_KEY_FLAG,
+          isCurried = bitmask & (WRAP_CURRY_FLAG | WRAP_CURRY_RIGHT_FLAG),
+          isFlip = bitmask & WRAP_FLIP_FLAG,
+          Ctor = isBindKey ? undefined : createCtor(func);
 
       function wrapper() {
         var length = arguments.length,
@@ -7117,8 +7749,8 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
         length -= holdersCount;
         if (isCurried && length < arity) {
           var newHolders = replaceHolders(args, placeholder);
-          return createRecurryWrapper(
-            func, bitmask, createHybridWrapper, wrapper.placeholder, thisArg,
+          return createRecurry(
+            func, bitmask, createHybrid, wrapper.placeholder, thisArg,
             args, newHolders, argPos, ary, arity - length
           );
         }
@@ -7135,7 +7767,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
           args.length = ary;
         }
         if (this && this !== root && this instanceof wrapper) {
-          fn = Ctor || createCtorWrapper(fn);
+          fn = Ctor || createCtor(fn);
         }
         return fn.apply(thisBinding, args);
       }
@@ -7161,13 +7793,14 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      *
      * @private
      * @param {Function} operator The function to perform the operation.
+     * @param {number} [defaultValue] The value used for `undefined` arguments.
      * @returns {Function} Returns the new mathematical operation function.
      */
-    function createMathOperation(operator) {
+    function createMathOperation(operator, defaultValue) {
       return function(value, other) {
         var result;
         if (value === undefined && other === undefined) {
-          return 0;
+          return defaultValue;
         }
         if (value !== undefined) {
           result = value;
@@ -7197,12 +7830,9 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @returns {Function} Returns the new over function.
      */
     function createOver(arrayFunc) {
-      return rest(function(iteratees) {
-        iteratees = (iteratees.length == 1 && isArray(iteratees[0]))
-          ? arrayMap(iteratees[0], baseUnary(getIteratee()))
-          : arrayMap(baseFlatten(iteratees, 1, isFlattenableIteratee), baseUnary(getIteratee()));
-
-        return rest(function(args) {
+      return flatRest(function(iteratees) {
+        iteratees = arrayMap(iteratees, baseUnary(getIteratee()));
+        return baseRest(function(args) {
           var thisArg = this;
           return arrayFunc(iteratees, function(iteratee) {
             return apply(iteratee, thisArg, args);
@@ -7228,7 +7858,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
         return charsLength ? baseRepeat(chars, length) : chars;
       }
       var result = baseRepeat(chars, nativeCeil(length / stringSize(chars)));
-      return reHasComplexSymbol.test(chars)
+      return hasUnicode(chars)
         ? castSlice(stringToArray(result), 0, length).join('')
         : result.slice(0, length);
     }
@@ -7239,16 +7869,15 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      *
      * @private
      * @param {Function} func The function to wrap.
-     * @param {number} bitmask The bitmask of wrapper flags. See `createWrapper`
-     *  for more details.
+     * @param {number} bitmask The bitmask flags. See `createWrap` for more details.
      * @param {*} thisArg The `this` binding of `func`.
      * @param {Array} partials The arguments to prepend to those provided to
      *  the new function.
      * @returns {Function} Returns the new wrapped function.
      */
-    function createPartialWrapper(func, bitmask, thisArg, partials) {
-      var isBind = bitmask & BIND_FLAG,
-          Ctor = createCtorWrapper(func);
+    function createPartial(func, bitmask, thisArg, partials) {
+      var isBind = bitmask & WRAP_BIND_FLAG,
+          Ctor = createCtor(func);
 
       function wrapper() {
         var argsIndex = -1,
@@ -7282,15 +7911,14 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
           end = step = undefined;
         }
         // Ensure the sign of `-0` is preserved.
-        start = toNumber(start);
-        start = start === start ? start : 0;
+        start = toFinite(start);
         if (end === undefined) {
           end = start;
           start = 0;
         } else {
-          end = toNumber(end) || 0;
+          end = toFinite(end);
         }
-        step = step === undefined ? (start < end ? 1 : -1) : (toNumber(step) || 0);
+        step = step === undefined ? (start < end ? 1 : -1) : toFinite(step);
         return baseRange(start, end, step, fromRight);
       };
     }
@@ -7317,8 +7945,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      *
      * @private
      * @param {Function} func The function to wrap.
-     * @param {number} bitmask The bitmask of wrapper flags. See `createWrapper`
-     *  for more details.
+     * @param {number} bitmask The bitmask flags. See `createWrap` for more details.
      * @param {Function} wrapFunc The function to create the `func` wrapper.
      * @param {*} placeholder The placeholder value.
      * @param {*} [thisArg] The `this` binding of `func`.
@@ -7330,18 +7957,18 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @param {number} [arity] The arity of `func`.
      * @returns {Function} Returns the new wrapped function.
      */
-    function createRecurryWrapper(func, bitmask, wrapFunc, placeholder, thisArg, partials, holders, argPos, ary, arity) {
-      var isCurry = bitmask & CURRY_FLAG,
+    function createRecurry(func, bitmask, wrapFunc, placeholder, thisArg, partials, holders, argPos, ary, arity) {
+      var isCurry = bitmask & WRAP_CURRY_FLAG,
           newHolders = isCurry ? holders : undefined,
           newHoldersRight = isCurry ? undefined : holders,
           newPartials = isCurry ? partials : undefined,
           newPartialsRight = isCurry ? undefined : partials;
 
-      bitmask |= (isCurry ? PARTIAL_FLAG : PARTIAL_RIGHT_FLAG);
-      bitmask &= ~(isCurry ? PARTIAL_RIGHT_FLAG : PARTIAL_FLAG);
+      bitmask |= (isCurry ? WRAP_PARTIAL_FLAG : WRAP_PARTIAL_RIGHT_FLAG);
+      bitmask &= ~(isCurry ? WRAP_PARTIAL_RIGHT_FLAG : WRAP_PARTIAL_FLAG);
 
-      if (!(bitmask & CURRY_BOUND_FLAG)) {
-        bitmask &= ~(BIND_FLAG | BIND_KEY_FLAG);
+      if (!(bitmask & WRAP_CURRY_BOUND_FLAG)) {
+        bitmask &= ~(WRAP_BIND_FLAG | WRAP_BIND_KEY_FLAG);
       }
       var newData = [
         func, bitmask, thisArg, newPartials, newHolders, newPartialsRight,
@@ -7353,7 +7980,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
         setData(result, newData);
       }
       result.placeholder = placeholder;
-      return result;
+      return setWrapToString(result, func, bitmask);
     }
 
     /**
@@ -7382,7 +8009,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
     }
 
     /**
-     * Creates a set of `values`.
+     * Creates a set object of `values`.
      *
      * @private
      * @param {Array} values The values to add to the set.
@@ -7418,18 +8045,17 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      *
      * @private
      * @param {Function|string} func The function or method name to wrap.
-     * @param {number} bitmask The bitmask of wrapper flags.
-     *  The bitmask may be composed of the following flags:
-     *     1 - `_.bind`
-     *     2 - `_.bindKey`
-     *     4 - `_.curry` or `_.curryRight` of a bound function
-     *     8 - `_.curry`
-     *    16 - `_.curryRight`
-     *    32 - `_.partial`
-     *    64 - `_.partialRight`
-     *   128 - `_.rearg`
-     *   256 - `_.ary`
-     *   512 - `_.flip`
+     * @param {number} bitmask The bitmask flags.
+     *    1 - `_.bind`
+     *    2 - `_.bindKey`
+     *    4 - `_.curry` or `_.curryRight` of a bound function
+     *    8 - `_.curry`
+     *   16 - `_.curryRight`
+     *   32 - `_.partial`
+     *   64 - `_.partialRight`
+     *  128 - `_.rearg`
+     *  256 - `_.ary`
+     *  512 - `_.flip`
      * @param {*} [thisArg] The `this` binding of `func`.
      * @param {Array} [partials] The arguments to be partially applied.
      * @param {Array} [holders] The `partials` placeholder indexes.
@@ -7438,21 +8064,21 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @param {number} [arity] The arity of `func`.
      * @returns {Function} Returns the new wrapped function.
      */
-    function createWrapper(func, bitmask, thisArg, partials, holders, argPos, ary, arity) {
-      var isBindKey = bitmask & BIND_KEY_FLAG;
+    function createWrap(func, bitmask, thisArg, partials, holders, argPos, ary, arity) {
+      var isBindKey = bitmask & WRAP_BIND_KEY_FLAG;
       if (!isBindKey && typeof func != 'function') {
         throw new TypeError(FUNC_ERROR_TEXT);
       }
       var length = partials ? partials.length : 0;
       if (!length) {
-        bitmask &= ~(PARTIAL_FLAG | PARTIAL_RIGHT_FLAG);
+        bitmask &= ~(WRAP_PARTIAL_FLAG | WRAP_PARTIAL_RIGHT_FLAG);
         partials = holders = undefined;
       }
       ary = ary === undefined ? ary : nativeMax(toInteger(ary), 0);
       arity = arity === undefined ? arity : toInteger(arity);
       length -= holders ? holders.length : 0;
 
-      if (bitmask & PARTIAL_RIGHT_FLAG) {
+      if (bitmask & WRAP_PARTIAL_RIGHT_FLAG) {
         var partialsRight = partials,
             holdersRight = holders;
 
@@ -7477,20 +8103,20 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
         ? (isBindKey ? 0 : func.length)
         : nativeMax(newData[9] - length, 0);
 
-      if (!arity && bitmask & (CURRY_FLAG | CURRY_RIGHT_FLAG)) {
-        bitmask &= ~(CURRY_FLAG | CURRY_RIGHT_FLAG);
+      if (!arity && bitmask & (WRAP_CURRY_FLAG | WRAP_CURRY_RIGHT_FLAG)) {
+        bitmask &= ~(WRAP_CURRY_FLAG | WRAP_CURRY_RIGHT_FLAG);
       }
-      if (!bitmask || bitmask == BIND_FLAG) {
-        var result = createBaseWrapper(func, bitmask, thisArg);
-      } else if (bitmask == CURRY_FLAG || bitmask == CURRY_RIGHT_FLAG) {
-        result = createCurryWrapper(func, bitmask, arity);
-      } else if ((bitmask == PARTIAL_FLAG || bitmask == (BIND_FLAG | PARTIAL_FLAG)) && !holders.length) {
-        result = createPartialWrapper(func, bitmask, thisArg, partials);
+      if (!bitmask || bitmask == WRAP_BIND_FLAG) {
+        var result = createBind(func, bitmask, thisArg);
+      } else if (bitmask == WRAP_CURRY_FLAG || bitmask == WRAP_CURRY_RIGHT_FLAG) {
+        result = createCurry(func, bitmask, arity);
+      } else if ((bitmask == WRAP_PARTIAL_FLAG || bitmask == (WRAP_BIND_FLAG | WRAP_PARTIAL_FLAG)) && !holders.length) {
+        result = createPartial(func, bitmask, thisArg, partials);
       } else {
-        result = createHybridWrapper.apply(undefined, newData);
+        result = createHybrid.apply(undefined, newData);
       }
       var setter = data ? baseSetData : setData;
-      return setter(result, newData);
+      return setWrapToString(setter(result, newData), func, bitmask);
     }
 
     /**
@@ -7500,15 +8126,14 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @private
      * @param {Array} array The array to compare.
      * @param {Array} other The other array to compare.
-     * @param {Function} equalFunc The function to determine equivalents of values.
+     * @param {number} bitmask The bitmask flags. See `baseIsEqual` for more details.
      * @param {Function} customizer The function to customize comparisons.
-     * @param {number} bitmask The bitmask of comparison flags. See `baseIsEqual`
-     *  for more details.
+     * @param {Function} equalFunc The function to determine equivalents of values.
      * @param {Object} stack Tracks traversed `array` and `other` objects.
      * @returns {boolean} Returns `true` if the arrays are equivalent, else `false`.
      */
-    function equalArrays(array, other, equalFunc, customizer, bitmask, stack) {
-      var isPartial = bitmask & PARTIAL_COMPARE_FLAG,
+    function equalArrays(array, other, bitmask, customizer, equalFunc, stack) {
+      var isPartial = bitmask & COMPARE_PARTIAL_FLAG,
           arrLength = array.length,
           othLength = other.length;
 
@@ -7517,14 +8142,15 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
       }
       // Assume cyclic values are equal.
       var stacked = stack.get(array);
-      if (stacked) {
+      if (stacked && stack.get(other)) {
         return stacked == other;
       }
       var index = -1,
           result = true,
-          seen = (bitmask & UNORDERED_COMPARE_FLAG) ? new SetCache : undefined;
+          seen = (bitmask & COMPARE_UNORDERED_FLAG) ? new SetCache : undefined;
 
       stack.set(array, other);
+      stack.set(other, array);
 
       // Ignore non-index properties.
       while (++index < arrLength) {
@@ -7546,9 +8172,9 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
         // Recursively compare arrays (susceptible to call stack limits).
         if (seen) {
           if (!arraySome(other, function(othValue, othIndex) {
-                if (!seen.has(othIndex) &&
-                    (arrValue === othValue || equalFunc(arrValue, othValue, customizer, bitmask, stack))) {
-                  return seen.add(othIndex);
+                if (!cacheHas(seen, othIndex) &&
+                    (arrValue === othValue || equalFunc(arrValue, othValue, bitmask, customizer, stack))) {
+                  return seen.push(othIndex);
                 }
               })) {
             result = false;
@@ -7556,13 +8182,14 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
           }
         } else if (!(
               arrValue === othValue ||
-                equalFunc(arrValue, othValue, customizer, bitmask, stack)
+                equalFunc(arrValue, othValue, bitmask, customizer, stack)
             )) {
           result = false;
           break;
         }
       }
       stack['delete'](array);
+      stack['delete'](other);
       return result;
     }
 
@@ -7577,14 +8204,13 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @param {Object} object The object to compare.
      * @param {Object} other The other object to compare.
      * @param {string} tag The `toStringTag` of the objects to compare.
-     * @param {Function} equalFunc The function to determine equivalents of values.
+     * @param {number} bitmask The bitmask flags. See `baseIsEqual` for more details.
      * @param {Function} customizer The function to customize comparisons.
-     * @param {number} bitmask The bitmask of comparison flags. See `baseIsEqual`
-     *  for more details.
+     * @param {Function} equalFunc The function to determine equivalents of values.
      * @param {Object} stack Tracks traversed `object` and `other` objects.
      * @returns {boolean} Returns `true` if the objects are equivalent, else `false`.
      */
-    function equalByTag(object, other, tag, equalFunc, customizer, bitmask, stack) {
+    function equalByTag(object, other, tag, bitmask, customizer, equalFunc, stack) {
       switch (tag) {
         case dataViewTag:
           if ((object.byteLength != other.byteLength) ||
@@ -7603,22 +8229,18 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
 
         case boolTag:
         case dateTag:
-          // Coerce dates and booleans to numbers, dates to milliseconds and
-          // booleans to `1` or `0` treating invalid dates coerced to `NaN` as
-          // not equal.
-          return +object == +other;
+        case numberTag:
+          // Coerce booleans to `1` or `0` and dates to milliseconds.
+          // Invalid dates are coerced to `NaN`.
+          return eq(+object, +other);
 
         case errorTag:
           return object.name == other.name && object.message == other.message;
 
-        case numberTag:
-          // Treat `NaN` vs. `NaN` as equal.
-          return (object != +object) ? other != +other : object == +other;
-
         case regexpTag:
         case stringTag:
           // Coerce regexes to strings and treat strings, primitives and objects,
-          // as equal. See http://www.ecma-international.org/ecma-262/6.0/#sec-regexp.prototype.tostring
+          // as equal. See http://www.ecma-international.org/ecma-262/7.0/#sec-regexp.prototype.tostring
           // for more details.
           return object == (other + '');
 
@@ -7626,7 +8248,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
           var convert = mapToArray;
 
         case setTag:
-          var isPartial = bitmask & PARTIAL_COMPARE_FLAG;
+          var isPartial = bitmask & COMPARE_PARTIAL_FLAG;
           convert || (convert = setToArray);
 
           if (object.size != other.size && !isPartial) {
@@ -7637,11 +8259,13 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
           if (stacked) {
             return stacked == other;
           }
-          bitmask |= UNORDERED_COMPARE_FLAG;
-          stack.set(object, other);
+          bitmask |= COMPARE_UNORDERED_FLAG;
 
           // Recursively compare objects (susceptible to call stack limits).
-          return equalArrays(convert(object), convert(other), equalFunc, customizer, bitmask, stack);
+          stack.set(object, other);
+          var result = equalArrays(convert(object), convert(other), bitmask, customizer, equalFunc, stack);
+          stack['delete'](object);
+          return result;
 
         case symbolTag:
           if (symbolValueOf) {
@@ -7658,15 +8282,14 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @private
      * @param {Object} object The object to compare.
      * @param {Object} other The other object to compare.
-     * @param {Function} equalFunc The function to determine equivalents of values.
+     * @param {number} bitmask The bitmask flags. See `baseIsEqual` for more details.
      * @param {Function} customizer The function to customize comparisons.
-     * @param {number} bitmask The bitmask of comparison flags. See `baseIsEqual`
-     *  for more details.
+     * @param {Function} equalFunc The function to determine equivalents of values.
      * @param {Object} stack Tracks traversed `object` and `other` objects.
      * @returns {boolean} Returns `true` if the objects are equivalent, else `false`.
      */
-    function equalObjects(object, other, equalFunc, customizer, bitmask, stack) {
-      var isPartial = bitmask & PARTIAL_COMPARE_FLAG,
+    function equalObjects(object, other, bitmask, customizer, equalFunc, stack) {
+      var isPartial = bitmask & COMPARE_PARTIAL_FLAG,
           objProps = keys(object),
           objLength = objProps.length,
           othProps = keys(other),
@@ -7678,17 +8301,18 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
       var index = objLength;
       while (index--) {
         var key = objProps[index];
-        if (!(isPartial ? key in other : baseHas(other, key))) {
+        if (!(isPartial ? key in other : hasOwnProperty.call(other, key))) {
           return false;
         }
       }
       // Assume cyclic values are equal.
       var stacked = stack.get(object);
-      if (stacked) {
+      if (stacked && stack.get(other)) {
         return stacked == other;
       }
       var result = true;
       stack.set(object, other);
+      stack.set(other, object);
 
       var skipCtor = isPartial;
       while (++index < objLength) {
@@ -7703,7 +8327,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
         }
         // Recursively compare objects (susceptible to call stack limits).
         if (!(compared === undefined
-              ? (objValue === othValue || equalFunc(objValue, othValue, customizer, bitmask, stack))
+              ? (objValue === othValue || equalFunc(objValue, othValue, bitmask, customizer, stack))
               : compared
             )) {
           result = false;
@@ -7724,7 +8348,19 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
         }
       }
       stack['delete'](object);
+      stack['delete'](other);
       return result;
+    }
+
+    /**
+     * A specialized version of `baseRest` which flattens the rest array.
+     *
+     * @private
+     * @param {Function} func The function to apply a rest parameter to.
+     * @returns {Function} Returns the new function.
+     */
+    function flatRest(func) {
+      return setToString(overRest(func, undefined, flatten), func + '');
     }
 
     /**
@@ -7813,19 +8449,6 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
     }
 
     /**
-     * Gets the "length" property value of `object`.
-     *
-     * **Note:** This function is used to avoid a
-     * [JIT bug](https://bugs.webkit.org/show_bug.cgi?id=142792) that affects
-     * Safari on at least iOS 8.1-8.3 ARM64.
-     *
-     * @private
-     * @param {Object} object The object to query.
-     * @returns {*} Returns the "length" value.
-     */
-    var getLength = baseProperty('length');
-
-    /**
      * Gets the data for `map`.
      *
      * @private
@@ -7874,43 +8497,49 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
     }
 
     /**
-     * Gets the `[[Prototype]]` of `value`.
+     * A specialized version of `baseGetTag` which ignores `Symbol.toStringTag` values.
      *
      * @private
      * @param {*} value The value to query.
-     * @returns {null|Object} Returns the `[[Prototype]]`.
+     * @returns {string} Returns the raw `toStringTag`.
      */
-    function getPrototype(value) {
-      return nativeGetPrototype(Object(value));
+    function getRawTag(value) {
+      var isOwn = hasOwnProperty.call(value, symToStringTag),
+          tag = value[symToStringTag];
+
+      try {
+        value[symToStringTag] = undefined;
+        var unmasked = true;
+      } catch (e) {}
+
+      var result = nativeObjectToString.call(value);
+      if (unmasked) {
+        if (isOwn) {
+          value[symToStringTag] = tag;
+        } else {
+          delete value[symToStringTag];
+        }
+      }
+      return result;
     }
 
     /**
-     * Creates an array of the own enumerable symbol properties of `object`.
+     * Creates an array of the own enumerable symbols of `object`.
      *
      * @private
      * @param {Object} object The object to query.
      * @returns {Array} Returns the array of symbols.
      */
-    function getSymbols(object) {
-      // Coerce `object` to an object to avoid non-object errors in V8.
-      // See https://bugs.chromium.org/p/v8/issues/detail?id=3443 for more details.
-      return getOwnPropertySymbols(Object(object));
-    }
-
-    // Fallback for IE < 11.
-    if (!getOwnPropertySymbols) {
-      getSymbols = stubArray;
-    }
+    var getSymbols = nativeGetSymbols ? overArg(nativeGetSymbols, Object) : stubArray;
 
     /**
-     * Creates an array of the own and inherited enumerable symbol properties
-     * of `object`.
+     * Creates an array of the own and inherited enumerable symbols of `object`.
      *
      * @private
      * @param {Object} object The object to query.
      * @returns {Array} Returns the array of symbols.
      */
-    var getSymbolsIn = !getOwnPropertySymbols ? getSymbols : function(object) {
+    var getSymbolsIn = !nativeGetSymbols ? stubArray : function(object) {
       var result = [];
       while (object) {
         arrayPush(result, getSymbols(object));
@@ -7926,21 +8555,18 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @param {*} value The value to query.
      * @returns {string} Returns the `toStringTag`.
      */
-    function getTag(value) {
-      return objectToString.call(value);
-    }
+    var getTag = baseGetTag;
 
-    // Fallback for data views, maps, sets, and weak maps in IE 11,
-    // for data views in Edge, and promises in Node.js.
+    // Fallback for data views, maps, sets, and weak maps in IE 11 and promises in Node.js < 6.
     if ((DataView && getTag(new DataView(new ArrayBuffer(1))) != dataViewTag) ||
         (Map && getTag(new Map) != mapTag) ||
         (Promise && getTag(Promise.resolve()) != promiseTag) ||
         (Set && getTag(new Set) != setTag) ||
         (WeakMap && getTag(new WeakMap) != weakMapTag)) {
       getTag = function(value) {
-        var result = objectToString.call(value),
+        var result = baseGetTag(value),
             Ctor = result == objectTag ? value.constructor : undefined,
-            ctorString = Ctor ? toSource(Ctor) : undefined;
+            ctorString = Ctor ? toSource(Ctor) : '';
 
         if (ctorString) {
           switch (ctorString) {
@@ -7984,6 +8610,18 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
     }
 
     /**
+     * Extracts wrapper details from the `source` body comment.
+     *
+     * @private
+     * @param {string} source The source to inspect.
+     * @returns {Array} Returns the wrapper details.
+     */
+    function getWrapDetails(source) {
+      var match = source.match(reWrapDetails);
+      return match ? match[1].split(reSplitDetails) : [];
+    }
+
+    /**
      * Checks if `path` exists on `object`.
      *
      * @private
@@ -7993,11 +8631,11 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @returns {boolean} Returns `true` if `path` exists, else `false`.
      */
     function hasPath(object, path, hasFunc) {
-      path = isKey(path, object) ? [path] : castPath(path);
+      path = castPath(path, object);
 
-      var result,
-          index = -1,
-          length = path.length;
+      var index = -1,
+          length = path.length,
+          result = false;
 
       while (++index < length) {
         var key = toKey(path[index]);
@@ -8006,12 +8644,12 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
         }
         object = object[key];
       }
-      if (result) {
+      if (result || ++index != length) {
         return result;
       }
-      var length = object ? object.length : 0;
+      length = object == null ? 0 : object.length;
       return !!length && isLength(length) && isIndex(key, length) &&
-        (isArray(object) || isString(object) || isArguments(object));
+        (isArray(object) || isArguments(object));
     }
 
     /**
@@ -8096,20 +8734,22 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
     }
 
     /**
-     * Creates an array of index keys for `object` values of arrays,
-     * `arguments` objects, and strings, otherwise `null` is returned.
+     * Inserts wrapper `details` in a comment at the top of the `source` body.
      *
      * @private
-     * @param {Object} object The object to query.
-     * @returns {Array|null} Returns index keys, else `null`.
+     * @param {string} source The source to modify.
+     * @returns {Array} details The details to insert.
+     * @returns {string} Returns the modified source.
      */
-    function indexKeys(object) {
-      var length = object ? object.length : undefined;
-      if (isLength(length) &&
-          (isArray(object) || isString(object) || isArguments(object))) {
-        return baseTimes(length, String);
+    function insertWrapDetails(source, details) {
+      var length = details.length;
+      if (!length) {
+        return source;
       }
-      return null;
+      var lastIndex = length - 1;
+      details[lastIndex] = (length > 1 ? '& ' : '') + details[lastIndex];
+      details = details.join(length > 2 ? ', ' : ' ');
+      return source.replace(reWrapComment, '{\n/* [wrapped with ' + details + '] */\n');
     }
 
     /**
@@ -8120,19 +8760,8 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @returns {boolean} Returns `true` if `value` is flattenable, else `false`.
      */
     function isFlattenable(value) {
-      return isArray(value) || isArguments(value);
-    }
-
-    /**
-     * Checks if `value` is a flattenable array and not a `_.matchesProperty`
-     * iteratee shorthand.
-     *
-     * @private
-     * @param {*} value The value to check.
-     * @returns {boolean} Returns `true` if `value` is flattenable, else `false`.
-     */
-    function isFlattenableIteratee(value) {
-      return isArray(value) && !(value.length == 2 && !isFunction(value[0]));
+      return isArray(value) || isArguments(value) ||
+        !!(spreadableSymbol && value && value[spreadableSymbol]);
     }
 
     /**
@@ -8297,6 +8926,26 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
     }
 
     /**
+     * A specialized version of `_.memoize` which clears the memoized function's
+     * cache when it exceeds `MAX_MEMOIZE_SIZE`.
+     *
+     * @private
+     * @param {Function} func The function to have its output memoized.
+     * @returns {Function} Returns the new memoized function.
+     */
+    function memoizeCapped(func) {
+      var result = memoize(func, function(key) {
+        if (cache.size === MAX_MEMOIZE_SIZE) {
+          cache.clear();
+        }
+        return key;
+      });
+
+      var cache = result.cache;
+      return result;
+    }
+
+    /**
      * Merges the function metadata of `source` into `data`.
      *
      * Merging metadata reduces the number of wrappers used to invoke a function.
@@ -8316,22 +8965,22 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
       var bitmask = data[1],
           srcBitmask = source[1],
           newBitmask = bitmask | srcBitmask,
-          isCommon = newBitmask < (BIND_FLAG | BIND_KEY_FLAG | ARY_FLAG);
+          isCommon = newBitmask < (WRAP_BIND_FLAG | WRAP_BIND_KEY_FLAG | WRAP_ARY_FLAG);
 
       var isCombo =
-        ((srcBitmask == ARY_FLAG) && (bitmask == CURRY_FLAG)) ||
-        ((srcBitmask == ARY_FLAG) && (bitmask == REARG_FLAG) && (data[7].length <= source[8])) ||
-        ((srcBitmask == (ARY_FLAG | REARG_FLAG)) && (source[7].length <= source[8]) && (bitmask == CURRY_FLAG));
+        ((srcBitmask == WRAP_ARY_FLAG) && (bitmask == WRAP_CURRY_FLAG)) ||
+        ((srcBitmask == WRAP_ARY_FLAG) && (bitmask == WRAP_REARG_FLAG) && (data[7].length <= source[8])) ||
+        ((srcBitmask == (WRAP_ARY_FLAG | WRAP_REARG_FLAG)) && (source[7].length <= source[8]) && (bitmask == WRAP_CURRY_FLAG));
 
       // Exit early if metadata can't be merged.
       if (!(isCommon || isCombo)) {
         return data;
       }
       // Use source `thisArg` if available.
-      if (srcBitmask & BIND_FLAG) {
+      if (srcBitmask & WRAP_BIND_FLAG) {
         data[2] = source[2];
         // Set when currying a bound function.
-        newBitmask |= bitmask & BIND_FLAG ? 0 : CURRY_BOUND_FLAG;
+        newBitmask |= bitmask & WRAP_BIND_FLAG ? 0 : WRAP_CURRY_BOUND_FLAG;
       }
       // Compose partial arguments.
       var value = source[3];
@@ -8353,7 +9002,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
         data[7] = value;
       }
       // Use source `ary` if it's smaller.
-      if (srcBitmask & ARY_FLAG) {
+      if (srcBitmask & WRAP_ARY_FLAG) {
         data[8] = data[8] == null ? source[8] : nativeMin(data[8], source[8]);
       }
       // Use source `arity` if one is not provided.
@@ -8382,9 +9031,72 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      */
     function mergeDefaults(objValue, srcValue, key, object, source, stack) {
       if (isObject(objValue) && isObject(srcValue)) {
-        baseMerge(objValue, srcValue, undefined, mergeDefaults, stack.set(srcValue, objValue));
+        // Recursively merge objects and arrays (susceptible to call stack limits).
+        stack.set(srcValue, objValue);
+        baseMerge(objValue, srcValue, undefined, mergeDefaults, stack);
+        stack['delete'](srcValue);
       }
       return objValue;
+    }
+
+    /**
+     * This function is like
+     * [`Object.keys`](http://ecma-international.org/ecma-262/7.0/#sec-object.keys)
+     * except that it includes inherited enumerable properties.
+     *
+     * @private
+     * @param {Object} object The object to query.
+     * @returns {Array} Returns the array of property names.
+     */
+    function nativeKeysIn(object) {
+      var result = [];
+      if (object != null) {
+        for (var key in Object(object)) {
+          result.push(key);
+        }
+      }
+      return result;
+    }
+
+    /**
+     * Converts `value` to a string using `Object.prototype.toString`.
+     *
+     * @private
+     * @param {*} value The value to convert.
+     * @returns {string} Returns the converted string.
+     */
+    function objectToString(value) {
+      return nativeObjectToString.call(value);
+    }
+
+    /**
+     * A specialized version of `baseRest` which transforms the rest array.
+     *
+     * @private
+     * @param {Function} func The function to apply a rest parameter to.
+     * @param {number} [start=func.length-1] The start position of the rest parameter.
+     * @param {Function} transform The rest array transform.
+     * @returns {Function} Returns the new function.
+     */
+    function overRest(func, start, transform) {
+      start = nativeMax(start === undefined ? (func.length - 1) : start, 0);
+      return function() {
+        var args = arguments,
+            index = -1,
+            length = nativeMax(args.length - start, 0),
+            array = Array(length);
+
+        while (++index < length) {
+          array[index] = args[start + index];
+        }
+        index = -1;
+        var otherArgs = Array(start + 1);
+        while (++index < start) {
+          otherArgs[index] = args[index];
+        }
+        otherArgs[start] = transform(array);
+        return apply(func, this, otherArgs);
+      };
     }
 
     /**
@@ -8396,7 +9108,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @returns {*} Returns the parent value.
      */
     function parent(object, path) {
-      return path.length == 1 ? object : baseGet(object, baseSlice(path, 0, -1));
+      return path.length < 2 ? object : baseGet(object, baseSlice(path, 0, -1));
     }
 
     /**
@@ -8435,25 +9147,98 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @param {*} data The metadata.
      * @returns {Function} Returns `func`.
      */
-    var setData = (function() {
+    var setData = shortOut(baseSetData);
+
+    /**
+     * A simple wrapper around the global [`setTimeout`](https://mdn.io/setTimeout).
+     *
+     * @private
+     * @param {Function} func The function to delay.
+     * @param {number} wait The number of milliseconds to delay invocation.
+     * @returns {number|Object} Returns the timer id or timeout object.
+     */
+    var setTimeout = ctxSetTimeout || function(func, wait) {
+      return root.setTimeout(func, wait);
+    };
+
+    /**
+     * Sets the `toString` method of `func` to return `string`.
+     *
+     * @private
+     * @param {Function} func The function to modify.
+     * @param {Function} string The `toString` result.
+     * @returns {Function} Returns `func`.
+     */
+    var setToString = shortOut(baseSetToString);
+
+    /**
+     * Sets the `toString` method of `wrapper` to mimic the source of `reference`
+     * with wrapper details in a comment at the top of the source body.
+     *
+     * @private
+     * @param {Function} wrapper The function to modify.
+     * @param {Function} reference The reference function.
+     * @param {number} bitmask The bitmask flags. See `createWrap` for more details.
+     * @returns {Function} Returns `wrapper`.
+     */
+    function setWrapToString(wrapper, reference, bitmask) {
+      var source = (reference + '');
+      return setToString(wrapper, insertWrapDetails(source, updateWrapDetails(getWrapDetails(source), bitmask)));
+    }
+
+    /**
+     * Creates a function that'll short out and invoke `identity` instead
+     * of `func` when it's called `HOT_COUNT` or more times in `HOT_SPAN`
+     * milliseconds.
+     *
+     * @private
+     * @param {Function} func The function to restrict.
+     * @returns {Function} Returns the new shortable function.
+     */
+    function shortOut(func) {
       var count = 0,
           lastCalled = 0;
 
-      return function(key, value) {
-        var stamp = now(),
+      return function() {
+        var stamp = nativeNow(),
             remaining = HOT_SPAN - (stamp - lastCalled);
 
         lastCalled = stamp;
         if (remaining > 0) {
           if (++count >= HOT_COUNT) {
-            return key;
+            return arguments[0];
           }
         } else {
           count = 0;
         }
-        return baseSetData(key, value);
+        return func.apply(undefined, arguments);
       };
-    }());
+    }
+
+    /**
+     * A specialized version of `_.shuffle` which mutates and sets the size of `array`.
+     *
+     * @private
+     * @param {Array} array The array to shuffle.
+     * @param {number} [size=array.length] The size of `array`.
+     * @returns {Array} Returns `array`.
+     */
+    function shuffleSelf(array, size) {
+      var index = -1,
+          length = array.length,
+          lastIndex = length - 1;
+
+      size = size === undefined ? length : size;
+      while (++index < size) {
+        var rand = baseRandom(index, lastIndex),
+            value = array[rand];
+
+        array[rand] = array[index];
+        array[index] = value;
+      }
+      array.length = size;
+      return array;
+    }
 
     /**
      * Converts `string` to a property path array.
@@ -8462,9 +9247,12 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @param {string} string The string to convert.
      * @returns {Array} Returns the property path array.
      */
-    var stringToPath = memoize(function(string) {
+    var stringToPath = memoizeCapped(function(string) {
       var result = [];
-      toString(string).replace(rePropName, function(match, number, quote, string) {
+      if (reLeadingDot.test(string)) {
+        result.push('');
+      }
+      string.replace(rePropName, function(match, number, quote, string) {
         result.push(quote ? string.replace(reEscapeChar, '$1') : (number || match));
       });
       return result;
@@ -8489,7 +9277,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * Converts `func` to its source code.
      *
      * @private
-     * @param {Function} func The function to process.
+     * @param {Function} func The function to convert.
      * @returns {string} Returns the source code.
      */
     function toSource(func) {
@@ -8502,6 +9290,24 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
         } catch (e) {}
       }
       return '';
+    }
+
+    /**
+     * Updates wrapper `details` based on `bitmask` flags.
+     *
+     * @private
+     * @returns {Array} details The details to modify.
+     * @param {number} bitmask The bitmask flags. See `createWrap` for more details.
+     * @returns {Array} Returns `details`.
+     */
+    function updateWrapDetails(details, bitmask) {
+      arrayEach(wrapFlags, function(pair) {
+        var value = '_.' + pair[0];
+        if ((bitmask & pair[1]) && !arrayIncludes(details, value)) {
+          details.push(value);
+        }
+      });
+      return details.sort();
     }
 
     /**
@@ -8551,7 +9357,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
       } else {
         size = nativeMax(toInteger(size), 0);
       }
-      var length = array ? array.length : 0;
+      var length = array == null ? 0 : array.length;
       if (!length || size < 1) {
         return [];
       }
@@ -8582,7 +9388,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      */
     function compact(array) {
       var index = -1,
-          length = array ? array.length : 0,
+          length = array == null ? 0 : array.length,
           resIndex = 0,
           result = [];
 
@@ -8618,24 +9424,27 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * // => [1]
      */
     function concat() {
-      var length = arguments.length,
-          args = Array(length ? length - 1 : 0),
+      var length = arguments.length;
+      if (!length) {
+        return [];
+      }
+      var args = Array(length - 1),
           array = arguments[0],
           index = length;
 
       while (index--) {
         args[index - 1] = arguments[index];
       }
-      return length
-        ? arrayPush(isArray(array) ? copyArray(array) : [array], baseFlatten(args, 1))
-        : [];
+      return arrayPush(isArray(array) ? copyArray(array) : [array], baseFlatten(args, 1));
     }
 
     /**
-     * Creates an array of unique `array` values not included in the other given
-     * arrays using [`SameValueZero`](http://ecma-international.org/ecma-262/6.0/#sec-samevaluezero)
-     * for equality comparisons. The order of result values is determined by the
-     * order they occur in the first array.
+     * Creates an array of `array` values not included in the other given arrays
+     * using [`SameValueZero`](http://ecma-international.org/ecma-262/7.0/#sec-samevaluezero)
+     * for equality comparisons. The order and references of result values are
+     * determined by the first array.
+     *
+     * **Note:** Unlike `_.pullAll`, this method returns a new array.
      *
      * @static
      * @memberOf _
@@ -8650,7 +9459,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * _.difference([2, 1], [2, 3]);
      * // => [1]
      */
-    var difference = rest(function(array, values) {
+    var difference = baseRest(function(array, values) {
       return isArrayLikeObject(array)
         ? baseDifference(array, baseFlatten(values, 1, isArrayLikeObject, true))
         : [];
@@ -8659,8 +9468,11 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
     /**
      * This method is like `_.difference` except that it accepts `iteratee` which
      * is invoked for each element of `array` and `values` to generate the criterion
-     * by which they're compared. Result values are chosen from the first array.
-     * The iteratee is invoked with one argument: (value).
+     * by which they're compared. The order and references of result values are
+     * determined by the first array. The iteratee is invoked with one argument:
+     * (value).
+     *
+     * **Note:** Unlike `_.pullAllBy`, this method returns a new array.
      *
      * @static
      * @memberOf _
@@ -8668,8 +9480,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @category Array
      * @param {Array} array The array to inspect.
      * @param {...Array} [values] The values to exclude.
-     * @param {Array|Function|Object|string} [iteratee=_.identity]
-     *  The iteratee invoked per element.
+     * @param {Function} [iteratee=_.identity] The iteratee invoked per element.
      * @returns {Array} Returns the new array of filtered values.
      * @example
      *
@@ -8680,21 +9491,23 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * _.differenceBy([{ 'x': 2 }, { 'x': 1 }], [{ 'x': 1 }], 'x');
      * // => [{ 'x': 2 }]
      */
-    var differenceBy = rest(function(array, values) {
+    var differenceBy = baseRest(function(array, values) {
       var iteratee = last(values);
       if (isArrayLikeObject(iteratee)) {
         iteratee = undefined;
       }
       return isArrayLikeObject(array)
-        ? baseDifference(array, baseFlatten(values, 1, isArrayLikeObject, true), getIteratee(iteratee))
+        ? baseDifference(array, baseFlatten(values, 1, isArrayLikeObject, true), getIteratee(iteratee, 2))
         : [];
     });
 
     /**
      * This method is like `_.difference` except that it accepts `comparator`
-     * which is invoked to compare elements of `array` to `values`. Result values
-     * are chosen from the first array. The comparator is invoked with two arguments:
-     * (arrVal, othVal).
+     * which is invoked to compare elements of `array` to `values`. The order and
+     * references of result values are determined by the first array. The comparator
+     * is invoked with two arguments: (arrVal, othVal).
+     *
+     * **Note:** Unlike `_.pullAllWith`, this method returns a new array.
      *
      * @static
      * @memberOf _
@@ -8711,7 +9524,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * _.differenceWith(objects, [{ 'x': 1, 'y': 2 }], _.isEqual);
      * // => [{ 'x': 2, 'y': 1 }]
      */
-    var differenceWith = rest(function(array, values) {
+    var differenceWith = baseRest(function(array, values) {
       var comparator = last(values);
       if (isArrayLikeObject(comparator)) {
         comparator = undefined;
@@ -8747,7 +9560,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * // => [1, 2, 3]
      */
     function drop(array, n, guard) {
-      var length = array ? array.length : 0;
+      var length = array == null ? 0 : array.length;
       if (!length) {
         return [];
       }
@@ -8781,7 +9594,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * // => [1, 2, 3]
      */
     function dropRight(array, n, guard) {
-      var length = array ? array.length : 0;
+      var length = array == null ? 0 : array.length;
       if (!length) {
         return [];
       }
@@ -8800,8 +9613,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @since 3.0.0
      * @category Array
      * @param {Array} array The array to query.
-     * @param {Array|Function|Object|string} [predicate=_.identity]
-     *  The function invoked per iteration.
+     * @param {Function} [predicate=_.identity] The function invoked per iteration.
      * @returns {Array} Returns the slice of `array`.
      * @example
      *
@@ -8842,8 +9654,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @since 3.0.0
      * @category Array
      * @param {Array} array The array to query.
-     * @param {Array|Function|Object|string} [predicate=_.identity]
-     *  The function invoked per iteration.
+     * @param {Function} [predicate=_.identity] The function invoked per iteration.
      * @returns {Array} Returns the slice of `array`.
      * @example
      *
@@ -8904,7 +9715,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * // => [4, '*', '*', 10]
      */
     function fill(array, value, start, end) {
-      var length = array ? array.length : 0;
+      var length = array == null ? 0 : array.length;
       if (!length) {
         return [];
       }
@@ -8923,9 +9734,8 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @memberOf _
      * @since 1.1.0
      * @category Array
-     * @param {Array} array The array to search.
-     * @param {Array|Function|Object|string} [predicate=_.identity]
-     *  The function invoked per iteration.
+     * @param {Array} array The array to inspect.
+     * @param {Function} [predicate=_.identity] The function invoked per iteration.
      * @param {number} [fromIndex=0] The index to search from.
      * @returns {number} Returns the index of the found element, else `-1`.
      * @example
@@ -8952,7 +9762,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * // => 2
      */
     function findIndex(array, predicate, fromIndex) {
-      var length = array ? array.length : 0;
+      var length = array == null ? 0 : array.length;
       if (!length) {
         return -1;
       }
@@ -8971,9 +9781,8 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @memberOf _
      * @since 2.0.0
      * @category Array
-     * @param {Array} array The array to search.
-     * @param {Array|Function|Object|string} [predicate=_.identity]
-     *  The function invoked per iteration.
+     * @param {Array} array The array to inspect.
+     * @param {Function} [predicate=_.identity] The function invoked per iteration.
      * @param {number} [fromIndex=array.length-1] The index to search from.
      * @returns {number} Returns the index of the found element, else `-1`.
      * @example
@@ -9000,7 +9809,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * // => 0
      */
     function findLastIndex(array, predicate, fromIndex) {
-      var length = array ? array.length : 0;
+      var length = array == null ? 0 : array.length;
       if (!length) {
         return -1;
       }
@@ -9029,7 +9838,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * // => [1, 2, [3, [4]], 5]
      */
     function flatten(array) {
-      var length = array ? array.length : 0;
+      var length = array == null ? 0 : array.length;
       return length ? baseFlatten(array, 1) : [];
     }
 
@@ -9048,7 +9857,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * // => [1, 2, 3, 4, 5]
      */
     function flattenDeep(array) {
-      var length = array ? array.length : 0;
+      var length = array == null ? 0 : array.length;
       return length ? baseFlatten(array, INFINITY) : [];
     }
 
@@ -9073,7 +9882,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * // => [1, 2, 3, [4], 5]
      */
     function flattenDepth(array, depth) {
-      var length = array ? array.length : 0;
+      var length = array == null ? 0 : array.length;
       if (!length) {
         return [];
       }
@@ -9093,12 +9902,12 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @returns {Object} Returns the new object.
      * @example
      *
-     * _.fromPairs([['fred', 30], ['barney', 40]]);
-     * // => { 'fred': 30, 'barney': 40 }
+     * _.fromPairs([['a', 1], ['b', 2]]);
+     * // => { 'a': 1, 'b': 2 }
      */
     function fromPairs(pairs) {
       var index = -1,
-          length = pairs ? pairs.length : 0,
+          length = pairs == null ? 0 : pairs.length,
           result = {};
 
       while (++index < length) {
@@ -9132,7 +9941,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
 
     /**
      * Gets the index at which the first occurrence of `value` is found in `array`
-     * using [`SameValueZero`](http://ecma-international.org/ecma-262/6.0/#sec-samevaluezero)
+     * using [`SameValueZero`](http://ecma-international.org/ecma-262/7.0/#sec-samevaluezero)
      * for equality comparisons. If `fromIndex` is negative, it's used as the
      * offset from the end of `array`.
      *
@@ -9140,7 +9949,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @memberOf _
      * @since 0.1.0
      * @category Array
-     * @param {Array} array The array to search.
+     * @param {Array} array The array to inspect.
      * @param {*} value The value to search for.
      * @param {number} [fromIndex=0] The index to search from.
      * @returns {number} Returns the index of the matched value, else `-1`.
@@ -9154,7 +9963,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * // => 3
      */
     function indexOf(array, value, fromIndex) {
-      var length = array ? array.length : 0;
+      var length = array == null ? 0 : array.length;
       if (!length) {
         return -1;
       }
@@ -9180,14 +9989,15 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * // => [1, 2]
      */
     function initial(array) {
-      return dropRight(array, 1);
+      var length = array == null ? 0 : array.length;
+      return length ? baseSlice(array, 0, -1) : [];
     }
 
     /**
      * Creates an array of unique values that are included in all given arrays
-     * using [`SameValueZero`](http://ecma-international.org/ecma-262/6.0/#sec-samevaluezero)
-     * for equality comparisons. The order of result values is determined by the
-     * order they occur in the first array.
+     * using [`SameValueZero`](http://ecma-international.org/ecma-262/7.0/#sec-samevaluezero)
+     * for equality comparisons. The order and references of result values are
+     * determined by the first array.
      *
      * @static
      * @memberOf _
@@ -9200,7 +10010,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * _.intersection([2, 1], [2, 3]);
      * // => [2]
      */
-    var intersection = rest(function(arrays) {
+    var intersection = baseRest(function(arrays) {
       var mapped = arrayMap(arrays, castArrayLikeObject);
       return (mapped.length && mapped[0] === arrays[0])
         ? baseIntersection(mapped)
@@ -9210,16 +10020,16 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
     /**
      * This method is like `_.intersection` except that it accepts `iteratee`
      * which is invoked for each element of each `arrays` to generate the criterion
-     * by which they're compared. Result values are chosen from the first array.
-     * The iteratee is invoked with one argument: (value).
+     * by which they're compared. The order and references of result values are
+     * determined by the first array. The iteratee is invoked with one argument:
+     * (value).
      *
      * @static
      * @memberOf _
      * @since 4.0.0
      * @category Array
      * @param {...Array} [arrays] The arrays to inspect.
-     * @param {Array|Function|Object|string} [iteratee=_.identity]
-     *  The iteratee invoked per element.
+     * @param {Function} [iteratee=_.identity] The iteratee invoked per element.
      * @returns {Array} Returns the new array of intersecting values.
      * @example
      *
@@ -9230,7 +10040,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * _.intersectionBy([{ 'x': 1 }], [{ 'x': 2 }, { 'x': 1 }], 'x');
      * // => [{ 'x': 1 }]
      */
-    var intersectionBy = rest(function(arrays) {
+    var intersectionBy = baseRest(function(arrays) {
       var iteratee = last(arrays),
           mapped = arrayMap(arrays, castArrayLikeObject);
 
@@ -9240,15 +10050,15 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
         mapped.pop();
       }
       return (mapped.length && mapped[0] === arrays[0])
-        ? baseIntersection(mapped, getIteratee(iteratee))
+        ? baseIntersection(mapped, getIteratee(iteratee, 2))
         : [];
     });
 
     /**
      * This method is like `_.intersection` except that it accepts `comparator`
-     * which is invoked to compare elements of `arrays`. Result values are chosen
-     * from the first array. The comparator is invoked with two arguments:
-     * (arrVal, othVal).
+     * which is invoked to compare elements of `arrays`. The order and references
+     * of result values are determined by the first array. The comparator is
+     * invoked with two arguments: (arrVal, othVal).
      *
      * @static
      * @memberOf _
@@ -9265,13 +10075,12 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * _.intersectionWith(objects, others, _.isEqual);
      * // => [{ 'x': 1, 'y': 2 }]
      */
-    var intersectionWith = rest(function(arrays) {
+    var intersectionWith = baseRest(function(arrays) {
       var comparator = last(arrays),
           mapped = arrayMap(arrays, castArrayLikeObject);
 
-      if (comparator === last(mapped)) {
-        comparator = undefined;
-      } else {
+      comparator = typeof comparator == 'function' ? comparator : undefined;
+      if (comparator) {
         mapped.pop();
       }
       return (mapped.length && mapped[0] === arrays[0])
@@ -9295,7 +10104,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * // => 'a~b~c'
      */
     function join(array, separator) {
-      return array ? nativeJoin.call(array, separator) : '';
+      return array == null ? '' : nativeJoin.call(array, separator);
     }
 
     /**
@@ -9313,7 +10122,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * // => 3
      */
     function last(array) {
-      var length = array ? array.length : 0;
+      var length = array == null ? 0 : array.length;
       return length ? array[length - 1] : undefined;
     }
 
@@ -9325,7 +10134,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @memberOf _
      * @since 0.1.0
      * @category Array
-     * @param {Array} array The array to search.
+     * @param {Array} array The array to inspect.
      * @param {*} value The value to search for.
      * @param {number} [fromIndex=array.length-1] The index to search from.
      * @returns {number} Returns the index of the matched value, else `-1`.
@@ -9339,28 +10148,18 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * // => 1
      */
     function lastIndexOf(array, value, fromIndex) {
-      var length = array ? array.length : 0;
+      var length = array == null ? 0 : array.length;
       if (!length) {
         return -1;
       }
       var index = length;
       if (fromIndex !== undefined) {
         index = toInteger(fromIndex);
-        index = (
-          index < 0
-            ? nativeMax(length + index, 0)
-            : nativeMin(index, length - 1)
-        ) + 1;
+        index = index < 0 ? nativeMax(length + index, 0) : nativeMin(index, length - 1);
       }
-      if (value !== value) {
-        return indexOfNaN(array, index - 1, true);
-      }
-      while (index--) {
-        if (array[index] === value) {
-          return index;
-        }
-      }
-      return -1;
+      return value === value
+        ? strictLastIndexOf(array, value, index)
+        : baseFindIndex(array, baseIsNaN, index, true);
     }
 
     /**
@@ -9390,7 +10189,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
 
     /**
      * Removes all given values from `array` using
-     * [`SameValueZero`](http://ecma-international.org/ecma-262/6.0/#sec-samevaluezero)
+     * [`SameValueZero`](http://ecma-international.org/ecma-262/7.0/#sec-samevaluezero)
      * for equality comparisons.
      *
      * **Note:** Unlike `_.without`, this method mutates `array`. Use `_.remove`
@@ -9411,7 +10210,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * console.log(array);
      * // => ['b', 'b']
      */
-    var pull = rest(pullAll);
+    var pull = baseRest(pullAll);
 
     /**
      * This method is like `_.pull` except that it accepts an array of values to remove.
@@ -9452,8 +10251,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @category Array
      * @param {Array} array The array to modify.
      * @param {Array} values The values to remove.
-     * @param {Array|Function|Object|string} [iteratee=_.identity]
-     *  The iteratee invoked per element.
+     * @param {Function} [iteratee=_.identity] The iteratee invoked per element.
      * @returns {Array} Returns `array`.
      * @example
      *
@@ -9465,7 +10263,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      */
     function pullAllBy(array, values, iteratee) {
       return (array && array.length && values && values.length)
-        ? basePullAll(array, values, getIteratee(iteratee))
+        ? basePullAll(array, values, getIteratee(iteratee, 2))
         : array;
     }
 
@@ -9522,10 +10320,8 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * console.log(pulled);
      * // => ['b', 'd']
      */
-    var pullAt = rest(function(array, indexes) {
-      indexes = baseFlatten(indexes, 1);
-
-      var length = array ? array.length : 0,
+    var pullAt = flatRest(function(array, indexes) {
+      var length = array == null ? 0 : array.length,
           result = baseAt(array, indexes);
 
       basePullAt(array, arrayMap(indexes, function(index) {
@@ -9548,8 +10344,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @since 2.0.0
      * @category Array
      * @param {Array} array The array to modify.
-     * @param {Array|Function|Object|string} [predicate=_.identity]
-     *  The function invoked per iteration.
+     * @param {Function} [predicate=_.identity] The function invoked per iteration.
      * @returns {Array} Returns the new array of removed elements.
      * @example
      *
@@ -9609,7 +10404,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * // => [3, 2, 1]
      */
     function reverse(array) {
-      return array ? nativeReverse.call(array) : array;
+      return array == null ? array : nativeReverse.call(array);
     }
 
     /**
@@ -9629,7 +10424,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @returns {Array} Returns the slice of `array`.
      */
     function slice(array, start, end) {
-      var length = array ? array.length : 0;
+      var length = array == null ? 0 : array.length;
       if (!length) {
         return [];
       }
@@ -9676,8 +10471,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @category Array
      * @param {Array} array The sorted array to inspect.
      * @param {*} value The value to evaluate.
-     * @param {Array|Function|Object|string} [iteratee=_.identity]
-     *  The iteratee invoked per element.
+     * @param {Function} [iteratee=_.identity] The iteratee invoked per element.
      * @returns {number} Returns the index at which `value` should be inserted
      *  into `array`.
      * @example
@@ -9692,7 +10486,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * // => 0
      */
     function sortedIndexBy(array, value, iteratee) {
-      return baseSortedIndexBy(array, value, getIteratee(iteratee));
+      return baseSortedIndexBy(array, value, getIteratee(iteratee, 2));
     }
 
     /**
@@ -9703,7 +10497,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @memberOf _
      * @since 4.0.0
      * @category Array
-     * @param {Array} array The array to search.
+     * @param {Array} array The array to inspect.
      * @param {*} value The value to search for.
      * @returns {number} Returns the index of the matched value, else `-1`.
      * @example
@@ -9712,7 +10506,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * // => 1
      */
     function sortedIndexOf(array, value) {
-      var length = array ? array.length : 0;
+      var length = array == null ? 0 : array.length;
       if (length) {
         var index = baseSortedIndex(array, value);
         if (index < length && eq(array[index], value)) {
@@ -9755,8 +10549,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @category Array
      * @param {Array} array The sorted array to inspect.
      * @param {*} value The value to evaluate.
-     * @param {Array|Function|Object|string} [iteratee=_.identity]
-     *  The iteratee invoked per element.
+     * @param {Function} [iteratee=_.identity] The iteratee invoked per element.
      * @returns {number} Returns the index at which `value` should be inserted
      *  into `array`.
      * @example
@@ -9771,7 +10564,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * // => 1
      */
     function sortedLastIndexBy(array, value, iteratee) {
-      return baseSortedIndexBy(array, value, getIteratee(iteratee), true);
+      return baseSortedIndexBy(array, value, getIteratee(iteratee, 2), true);
     }
 
     /**
@@ -9782,7 +10575,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @memberOf _
      * @since 4.0.0
      * @category Array
-     * @param {Array} array The array to search.
+     * @param {Array} array The array to inspect.
      * @param {*} value The value to search for.
      * @returns {number} Returns the index of the matched value, else `-1`.
      * @example
@@ -9791,7 +10584,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * // => 3
      */
     function sortedLastIndexOf(array, value) {
-      var length = array ? array.length : 0;
+      var length = array == null ? 0 : array.length;
       if (length) {
         var index = baseSortedIndex(array, value, true) - 1;
         if (eq(array[index], value)) {
@@ -9840,7 +10633,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      */
     function sortedUniqBy(array, iteratee) {
       return (array && array.length)
-        ? baseSortedUniq(array, getIteratee(iteratee))
+        ? baseSortedUniq(array, getIteratee(iteratee, 2))
         : [];
     }
 
@@ -9859,7 +10652,8 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * // => [2, 3]
      */
     function tail(array) {
-      return drop(array, 1);
+      var length = array == null ? 0 : array.length;
+      return length ? baseSlice(array, 1, length) : [];
     }
 
     /**
@@ -9921,7 +10715,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * // => []
      */
     function takeRight(array, n, guard) {
-      var length = array ? array.length : 0;
+      var length = array == null ? 0 : array.length;
       if (!length) {
         return [];
       }
@@ -9940,8 +10734,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @since 3.0.0
      * @category Array
      * @param {Array} array The array to query.
-     * @param {Array|Function|Object|string} [predicate=_.identity]
-     *  The function invoked per iteration.
+     * @param {Function} [predicate=_.identity] The function invoked per iteration.
      * @returns {Array} Returns the slice of `array`.
      * @example
      *
@@ -9982,8 +10775,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @since 3.0.0
      * @category Array
      * @param {Array} array The array to query.
-     * @param {Array|Function|Object|string} [predicate=_.identity]
-     *  The function invoked per iteration.
+     * @param {Function} [predicate=_.identity] The function invoked per iteration.
      * @returns {Array} Returns the slice of `array`.
      * @example
      *
@@ -10016,7 +10808,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
 
     /**
      * Creates an array of unique values, in order, from all given arrays using
-     * [`SameValueZero`](http://ecma-international.org/ecma-262/6.0/#sec-samevaluezero)
+     * [`SameValueZero`](http://ecma-international.org/ecma-262/7.0/#sec-samevaluezero)
      * for equality comparisons.
      *
      * @static
@@ -10030,14 +10822,15 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * _.union([2], [1, 2]);
      * // => [2, 1]
      */
-    var union = rest(function(arrays) {
+    var union = baseRest(function(arrays) {
       return baseUniq(baseFlatten(arrays, 1, isArrayLikeObject, true));
     });
 
     /**
      * This method is like `_.union` except that it accepts `iteratee` which is
      * invoked for each element of each `arrays` to generate the criterion by
-     * which uniqueness is computed. The iteratee is invoked with one argument:
+     * which uniqueness is computed. Result values are chosen from the first
+     * array in which the value occurs. The iteratee is invoked with one argument:
      * (value).
      *
      * @static
@@ -10045,8 +10838,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @since 4.0.0
      * @category Array
      * @param {...Array} [arrays] The arrays to inspect.
-     * @param {Array|Function|Object|string} [iteratee=_.identity]
-     *  The iteratee invoked per element.
+     * @param {Function} [iteratee=_.identity] The iteratee invoked per element.
      * @returns {Array} Returns the new array of combined values.
      * @example
      *
@@ -10057,17 +10849,18 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * _.unionBy([{ 'x': 1 }], [{ 'x': 2 }, { 'x': 1 }], 'x');
      * // => [{ 'x': 1 }, { 'x': 2 }]
      */
-    var unionBy = rest(function(arrays) {
+    var unionBy = baseRest(function(arrays) {
       var iteratee = last(arrays);
       if (isArrayLikeObject(iteratee)) {
         iteratee = undefined;
       }
-      return baseUniq(baseFlatten(arrays, 1, isArrayLikeObject, true), getIteratee(iteratee));
+      return baseUniq(baseFlatten(arrays, 1, isArrayLikeObject, true), getIteratee(iteratee, 2));
     });
 
     /**
      * This method is like `_.union` except that it accepts `comparator` which
-     * is invoked to compare elements of `arrays`. The comparator is invoked
+     * is invoked to compare elements of `arrays`. Result values are chosen from
+     * the first array in which the value occurs. The comparator is invoked
      * with two arguments: (arrVal, othVal).
      *
      * @static
@@ -10085,19 +10878,18 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * _.unionWith(objects, others, _.isEqual);
      * // => [{ 'x': 1, 'y': 2 }, { 'x': 2, 'y': 1 }, { 'x': 1, 'y': 1 }]
      */
-    var unionWith = rest(function(arrays) {
+    var unionWith = baseRest(function(arrays) {
       var comparator = last(arrays);
-      if (isArrayLikeObject(comparator)) {
-        comparator = undefined;
-      }
+      comparator = typeof comparator == 'function' ? comparator : undefined;
       return baseUniq(baseFlatten(arrays, 1, isArrayLikeObject, true), undefined, comparator);
     });
 
     /**
      * Creates a duplicate-free version of an array, using
-     * [`SameValueZero`](http://ecma-international.org/ecma-262/6.0/#sec-samevaluezero)
-     * for equality comparisons, in which only the first occurrence of each
-     * element is kept.
+     * [`SameValueZero`](http://ecma-international.org/ecma-262/7.0/#sec-samevaluezero)
+     * for equality comparisons, in which only the first occurrence of each element
+     * is kept. The order of result values is determined by the order they occur
+     * in the array.
      *
      * @static
      * @memberOf _
@@ -10111,23 +10903,22 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * // => [2, 1]
      */
     function uniq(array) {
-      return (array && array.length)
-        ? baseUniq(array)
-        : [];
+      return (array && array.length) ? baseUniq(array) : [];
     }
 
     /**
      * This method is like `_.uniq` except that it accepts `iteratee` which is
      * invoked for each element in `array` to generate the criterion by which
-     * uniqueness is computed. The iteratee is invoked with one argument: (value).
+     * uniqueness is computed. The order of result values is determined by the
+     * order they occur in the array. The iteratee is invoked with one argument:
+     * (value).
      *
      * @static
      * @memberOf _
      * @since 4.0.0
      * @category Array
      * @param {Array} array The array to inspect.
-     * @param {Array|Function|Object|string} [iteratee=_.identity]
-     *  The iteratee invoked per element.
+     * @param {Function} [iteratee=_.identity] The iteratee invoked per element.
      * @returns {Array} Returns the new duplicate free array.
      * @example
      *
@@ -10139,15 +10930,14 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * // => [{ 'x': 1 }, { 'x': 2 }]
      */
     function uniqBy(array, iteratee) {
-      return (array && array.length)
-        ? baseUniq(array, getIteratee(iteratee))
-        : [];
+      return (array && array.length) ? baseUniq(array, getIteratee(iteratee, 2)) : [];
     }
 
     /**
      * This method is like `_.uniq` except that it accepts `comparator` which
-     * is invoked to compare elements of `array`. The comparator is invoked with
-     * two arguments: (arrVal, othVal).
+     * is invoked to compare elements of `array`. The order of result values is
+     * determined by the order they occur in the array.The comparator is invoked
+     * with two arguments: (arrVal, othVal).
      *
      * @static
      * @memberOf _
@@ -10164,9 +10954,8 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * // => [{ 'x': 1, 'y': 2 }, { 'x': 2, 'y': 1 }]
      */
     function uniqWith(array, comparator) {
-      return (array && array.length)
-        ? baseUniq(array, undefined, comparator)
-        : [];
+      comparator = typeof comparator == 'function' ? comparator : undefined;
+      return (array && array.length) ? baseUniq(array, undefined, comparator) : [];
     }
 
     /**
@@ -10182,11 +10971,11 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @returns {Array} Returns the new array of regrouped elements.
      * @example
      *
-     * var zipped = _.zip(['fred', 'barney'], [30, 40], [true, false]);
-     * // => [['fred', 30, true], ['barney', 40, false]]
+     * var zipped = _.zip(['a', 'b'], [1, 2], [true, false]);
+     * // => [['a', 1, true], ['b', 2, false]]
      *
      * _.unzip(zipped);
-     * // => [['fred', 'barney'], [30, 40], [true, false]]
+     * // => [['a', 'b'], [1, 2], [true, false]]
      */
     function unzip(array) {
       if (!(array && array.length)) {
@@ -10240,8 +11029,10 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
 
     /**
      * Creates an array excluding all given values using
-     * [`SameValueZero`](http://ecma-international.org/ecma-262/6.0/#sec-samevaluezero)
+     * [`SameValueZero`](http://ecma-international.org/ecma-262/7.0/#sec-samevaluezero)
      * for equality comparisons.
+     *
+     * **Note:** Unlike `_.pull`, this method returns a new array.
      *
      * @static
      * @memberOf _
@@ -10256,7 +11047,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * _.without([2, 1, 2, 3], 1, 2);
      * // => [3]
      */
-    var without = rest(function(array, values) {
+    var without = baseRest(function(array, values) {
       return isArrayLikeObject(array)
         ? baseDifference(array, values)
         : [];
@@ -10280,23 +11071,23 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * _.xor([2, 1], [2, 3]);
      * // => [1, 3]
      */
-    var xor = rest(function(arrays) {
+    var xor = baseRest(function(arrays) {
       return baseXor(arrayFilter(arrays, isArrayLikeObject));
     });
 
     /**
      * This method is like `_.xor` except that it accepts `iteratee` which is
      * invoked for each element of each `arrays` to generate the criterion by
-     * which by which they're compared. The iteratee is invoked with one argument:
-     * (value).
+     * which by which they're compared. The order of result values is determined
+     * by the order they occur in the arrays. The iteratee is invoked with one
+     * argument: (value).
      *
      * @static
      * @memberOf _
      * @since 4.0.0
      * @category Array
      * @param {...Array} [arrays] The arrays to inspect.
-     * @param {Array|Function|Object|string} [iteratee=_.identity]
-     *  The iteratee invoked per element.
+     * @param {Function} [iteratee=_.identity] The iteratee invoked per element.
      * @returns {Array} Returns the new array of filtered values.
      * @example
      *
@@ -10307,18 +11098,19 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * _.xorBy([{ 'x': 1 }], [{ 'x': 2 }, { 'x': 1 }], 'x');
      * // => [{ 'x': 2 }]
      */
-    var xorBy = rest(function(arrays) {
+    var xorBy = baseRest(function(arrays) {
       var iteratee = last(arrays);
       if (isArrayLikeObject(iteratee)) {
         iteratee = undefined;
       }
-      return baseXor(arrayFilter(arrays, isArrayLikeObject), getIteratee(iteratee));
+      return baseXor(arrayFilter(arrays, isArrayLikeObject), getIteratee(iteratee, 2));
     });
 
     /**
      * This method is like `_.xor` except that it accepts `comparator` which is
-     * invoked to compare elements of `arrays`. The comparator is invoked with
-     * two arguments: (arrVal, othVal).
+     * invoked to compare elements of `arrays`. The order of result values is
+     * determined by the order they occur in the arrays. The comparator is invoked
+     * with two arguments: (arrVal, othVal).
      *
      * @static
      * @memberOf _
@@ -10335,11 +11127,9 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * _.xorWith(objects, others, _.isEqual);
      * // => [{ 'x': 2, 'y': 1 }, { 'x': 1, 'y': 1 }]
      */
-    var xorWith = rest(function(arrays) {
+    var xorWith = baseRest(function(arrays) {
       var comparator = last(arrays);
-      if (isArrayLikeObject(comparator)) {
-        comparator = undefined;
-      }
+      comparator = typeof comparator == 'function' ? comparator : undefined;
       return baseXor(arrayFilter(arrays, isArrayLikeObject), undefined, comparator);
     });
 
@@ -10356,10 +11146,10 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @returns {Array} Returns the new array of grouped elements.
      * @example
      *
-     * _.zip(['fred', 'barney'], [30, 40], [true, false]);
-     * // => [['fred', 30, true], ['barney', 40, false]]
+     * _.zip(['a', 'b'], [1, 2], [true, false]);
+     * // => [['a', 1, true], ['b', 2, false]]
      */
-    var zip = rest(unzip);
+    var zip = baseRest(unzip);
 
     /**
      * This method is like `_.fromPairs` except that it accepts two arrays,
@@ -10410,7 +11200,8 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @since 3.8.0
      * @category Array
      * @param {...Array} [arrays] The arrays to process.
-     * @param {Function} [iteratee=_.identity] The function to combine grouped values.
+     * @param {Function} [iteratee=_.identity] The function to combine
+     *  grouped values.
      * @returns {Array} Returns the new array of grouped elements.
      * @example
      *
@@ -10419,7 +11210,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * });
      * // => [111, 222]
      */
-    var zipWith = rest(function(arrays) {
+    var zipWith = baseRest(function(arrays) {
       var length = arrays.length,
           iteratee = length > 1 ? arrays[length - 1] : undefined;
 
@@ -10526,7 +11317,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @memberOf _
      * @since 1.0.0
      * @category Seq
-     * @param {...(string|string[])} [paths] The property paths of elements to pick.
+     * @param {...(string|string[])} [paths] The property paths to pick.
      * @returns {Object} Returns the new `lodash` wrapper instance.
      * @example
      *
@@ -10535,8 +11326,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * _(object).at(['a[0].b.c', 'a[1]']).value();
      * // => [3, 4]
      */
-    var wrapperAt = rest(function(paths) {
-      paths = baseFlatten(paths, 1);
+    var wrapperAt = flatRest(function(paths) {
       var length = paths.length,
           start = length ? paths[0] : 0,
           value = this.__wrapped__,
@@ -10788,8 +11578,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @since 0.5.0
      * @category Collection
      * @param {Array|Object} collection The collection to iterate over.
-     * @param {Array|Function|Object|string} [iteratee=_.identity]
-     *  The iteratee to transform keys.
+     * @param {Function} [iteratee=_.identity] The iteratee to transform keys.
      * @returns {Object} Returns the composed aggregate object.
      * @example
      *
@@ -10801,7 +11590,11 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * // => { '3': 2, '5': 1 }
      */
     var countBy = createAggregator(function(result, value, key) {
-      hasOwnProperty.call(result, key) ? ++result[key] : (result[key] = 1);
+      if (hasOwnProperty.call(result, key)) {
+        ++result[key];
+      } else {
+        baseAssignValue(result, key, 1);
+      }
     });
 
     /**
@@ -10809,13 +11602,17 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * Iteration is stopped once `predicate` returns falsey. The predicate is
      * invoked with three arguments: (value, index|key, collection).
      *
+     * **Note:** This method returns `true` for
+     * [empty collections](https://en.wikipedia.org/wiki/Empty_set) because
+     * [everything is true](https://en.wikipedia.org/wiki/Vacuous_truth) of
+     * elements of empty collections.
+     *
      * @static
      * @memberOf _
      * @since 0.1.0
      * @category Collection
      * @param {Array|Object} collection The collection to iterate over.
-     * @param {Array|Function|Object|string} [predicate=_.identity]
-     *  The function invoked per iteration.
+     * @param {Function} [predicate=_.identity] The function invoked per iteration.
      * @param- {Object} [guard] Enables use as an iteratee for methods like `_.map`.
      * @returns {boolean} Returns `true` if all elements pass the predicate check,
      *  else `false`.
@@ -10854,13 +11651,14 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * `predicate` returns truthy for. The predicate is invoked with three
      * arguments: (value, index|key, collection).
      *
+     * **Note:** Unlike `_.remove`, this method returns a new array.
+     *
      * @static
      * @memberOf _
      * @since 0.1.0
      * @category Collection
      * @param {Array|Object} collection The collection to iterate over.
-     * @param {Array|Function|Object|string} [predicate=_.identity]
-     *  The function invoked per iteration.
+     * @param {Function} [predicate=_.identity] The function invoked per iteration.
      * @returns {Array} Returns the new filtered array.
      * @see _.reject
      * @example
@@ -10899,9 +11697,8 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @memberOf _
      * @since 0.1.0
      * @category Collection
-     * @param {Array|Object} collection The collection to search.
-     * @param {Array|Function|Object|string} [predicate=_.identity]
-     *  The function invoked per iteration.
+     * @param {Array|Object} collection The collection to inspect.
+     * @param {Function} [predicate=_.identity] The function invoked per iteration.
      * @param {number} [fromIndex=0] The index to search from.
      * @returns {*} Returns the matched element, else `undefined`.
      * @example
@@ -10937,9 +11734,8 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @memberOf _
      * @since 2.0.0
      * @category Collection
-     * @param {Array|Object} collection The collection to search.
-     * @param {Array|Function|Object|string} [predicate=_.identity]
-     *  The function invoked per iteration.
+     * @param {Array|Object} collection The collection to inspect.
+     * @param {Function} [predicate=_.identity] The function invoked per iteration.
      * @param {number} [fromIndex=collection.length-1] The index to search from.
      * @returns {*} Returns the matched element, else `undefined`.
      * @example
@@ -10961,8 +11757,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @since 4.0.0
      * @category Collection
      * @param {Array|Object} collection The collection to iterate over.
-     * @param {Array|Function|Object|string} [iteratee=_.identity]
-     *  The function invoked per iteration.
+     * @param {Function} [iteratee=_.identity] The function invoked per iteration.
      * @returns {Array} Returns the new flattened array.
      * @example
      *
@@ -10986,8 +11781,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @since 4.7.0
      * @category Collection
      * @param {Array|Object} collection The collection to iterate over.
-     * @param {Array|Function|Object|string} [iteratee=_.identity]
-     *  The function invoked per iteration.
+     * @param {Function} [iteratee=_.identity] The function invoked per iteration.
      * @returns {Array} Returns the new flattened array.
      * @example
      *
@@ -11011,8 +11805,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @since 4.7.0
      * @category Collection
      * @param {Array|Object} collection The collection to iterate over.
-     * @param {Array|Function|Object|string} [iteratee=_.identity]
-     *  The function invoked per iteration.
+     * @param {Function} [iteratee=_.identity] The function invoked per iteration.
      * @param {number} [depth=1] The maximum recursion depth.
      * @returns {Array} Returns the new flattened array.
      * @example
@@ -11049,7 +11842,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @see _.forEachRight
      * @example
      *
-     * _([1, 2]).forEach(function(value) {
+     * _.forEach([1, 2], function(value) {
      *   console.log(value);
      * });
      * // => Logs `1` then `2`.
@@ -11101,8 +11894,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @since 0.1.0
      * @category Collection
      * @param {Array|Object} collection The collection to iterate over.
-     * @param {Array|Function|Object|string} [iteratee=_.identity]
-     *  The iteratee to transform keys.
+     * @param {Function} [iteratee=_.identity] The iteratee to transform keys.
      * @returns {Object} Returns the composed aggregate object.
      * @example
      *
@@ -11117,14 +11909,14 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
       if (hasOwnProperty.call(result, key)) {
         result[key].push(value);
       } else {
-        result[key] = [value];
+        baseAssignValue(result, key, [value]);
       }
     });
 
     /**
      * Checks if `value` is in `collection`. If `collection` is a string, it's
      * checked for a substring of `value`, otherwise
-     * [`SameValueZero`](http://ecma-international.org/ecma-262/6.0/#sec-samevaluezero)
+     * [`SameValueZero`](http://ecma-international.org/ecma-262/7.0/#sec-samevaluezero)
      * is used for equality comparisons. If `fromIndex` is negative, it's used as
      * the offset from the end of `collection`.
      *
@@ -11132,7 +11924,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @memberOf _
      * @since 0.1.0
      * @category Collection
-     * @param {Array|Object|string} collection The collection to search.
+     * @param {Array|Object|string} collection The collection to inspect.
      * @param {*} value The value to search for.
      * @param {number} [fromIndex=0] The index to search from.
      * @param- {Object} [guard] Enables use as an iteratee for methods like `_.reduce`.
@@ -11145,10 +11937,10 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * _.includes([1, 2, 3], 1, 2);
      * // => false
      *
-     * _.includes({ 'user': 'fred', 'age': 40 }, 'fred');
+     * _.includes({ 'a': 1, 'b': 2 }, 1);
      * // => true
      *
-     * _.includes('pebbles', 'eb');
+     * _.includes('abcd', 'bc');
      * // => true
      */
     function includes(collection, value, fromIndex, guard) {
@@ -11167,8 +11959,8 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
     /**
      * Invokes the method at `path` of each element in `collection`, returning
      * an array of the results of each invoked method. Any additional arguments
-     * are provided to each invoked method. If `methodName` is a function, it's
-     * invoked for and `this` bound to, each element in `collection`.
+     * are provided to each invoked method. If `path` is a function, it's invoked
+     * for, and `this` bound to, each element in `collection`.
      *
      * @static
      * @memberOf _
@@ -11187,15 +11979,13 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * _.invokeMap([123, 456], String.prototype.split, '');
      * // => [['1', '2', '3'], ['4', '5', '6']]
      */
-    var invokeMap = rest(function(collection, path, args) {
+    var invokeMap = baseRest(function(collection, path, args) {
       var index = -1,
           isFunc = typeof path == 'function',
-          isProp = isKey(path),
           result = isArrayLike(collection) ? Array(collection.length) : [];
 
       baseEach(collection, function(value) {
-        var func = isFunc ? path : ((isProp && value != null) ? value[path] : undefined);
-        result[++index] = func ? apply(func, value, args) : baseInvoke(value, path, args);
+        result[++index] = isFunc ? apply(path, value, args) : baseInvoke(value, path, args);
       });
       return result;
     });
@@ -11211,8 +12001,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @since 4.0.0
      * @category Collection
      * @param {Array|Object} collection The collection to iterate over.
-     * @param {Array|Function|Object|string} [iteratee=_.identity]
-     *  The iteratee to transform keys.
+     * @param {Function} [iteratee=_.identity] The iteratee to transform keys.
      * @returns {Object} Returns the composed aggregate object.
      * @example
      *
@@ -11230,7 +12019,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * // => { 'left': { 'dir': 'left', 'code': 97 }, 'right': { 'dir': 'right', 'code': 100 } }
      */
     var keyBy = createAggregator(function(result, value, key) {
-      result[key] = value;
+      baseAssignValue(result, key, value);
     });
 
     /**
@@ -11252,8 +12041,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @since 0.1.0
      * @category Collection
      * @param {Array|Object} collection The collection to iterate over.
-     * @param {Array|Function|Object|string} [iteratee=_.identity]
-     *  The function invoked per iteration.
+     * @param {Function} [iteratee=_.identity] The function invoked per iteration.
      * @returns {Array} Returns the new mapped array.
      * @example
      *
@@ -11335,8 +12123,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @since 3.0.0
      * @category Collection
      * @param {Array|Object} collection The collection to iterate over.
-     * @param {Array|Function|Object|string} [predicate=_.identity]
-     *  The function invoked per iteration.
+     * @param {Function} [predicate=_.identity] The function invoked per iteration.
      * @returns {Array} Returns the array of grouped elements.
      * @example
      *
@@ -11447,8 +12234,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @since 0.1.0
      * @category Collection
      * @param {Array|Object} collection The collection to iterate over.
-     * @param {Array|Function|Object|string} [predicate=_.identity]
-     *  The function invoked per iteration.
+     * @param {Function} [predicate=_.identity] The function invoked per iteration.
      * @returns {Array} Returns the new filtered array.
      * @see _.filter
      * @example
@@ -11475,10 +12261,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      */
     function reject(collection, predicate) {
       var func = isArray(collection) ? arrayFilter : baseFilter;
-      predicate = getIteratee(predicate, 3);
-      return func(collection, function(value, index, collection) {
-        return !predicate(value, index, collection);
-      });
+      return func(collection, negate(getIteratee(predicate, 3)));
     }
 
     /**
@@ -11496,10 +12279,8 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * // => 2
      */
     function sample(collection) {
-      var array = isArrayLike(collection) ? collection : values(collection),
-          length = array.length;
-
-      return length > 0 ? array[baseRandom(0, length - 1)] : undefined;
+      var func = isArray(collection) ? arraySample : baseSample;
+      return func(collection);
     }
 
     /**
@@ -11523,25 +12304,13 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * // => [2, 3, 1]
      */
     function sampleSize(collection, n, guard) {
-      var index = -1,
-          result = toArray(collection),
-          length = result.length,
-          lastIndex = length - 1;
-
       if ((guard ? isIterateeCall(collection, n, guard) : n === undefined)) {
         n = 1;
       } else {
-        n = baseClamp(toInteger(n), 0, length);
+        n = toInteger(n);
       }
-      while (++index < n) {
-        var rand = baseRandom(index, lastIndex),
-            value = result[rand];
-
-        result[rand] = result[index];
-        result[index] = value;
-      }
-      result.length = n;
-      return result;
+      var func = isArray(collection) ? arraySampleSize : baseSampleSize;
+      return func(collection, n);
     }
 
     /**
@@ -11560,7 +12329,8 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * // => [4, 1, 3, 2]
      */
     function shuffle(collection) {
-      return sampleSize(collection, MAX_ARRAY_LENGTH);
+      var func = isArray(collection) ? arrayShuffle : baseShuffle;
+      return func(collection);
     }
 
     /**
@@ -11571,7 +12341,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @memberOf _
      * @since 0.1.0
      * @category Collection
-     * @param {Array|Object} collection The collection to inspect.
+     * @param {Array|Object|string} collection The collection to inspect.
      * @returns {number} Returns the collection size.
      * @example
      *
@@ -11589,16 +12359,13 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
         return 0;
       }
       if (isArrayLike(collection)) {
-        var result = collection.length;
-        return (result && isString(collection)) ? stringSize(collection) : result;
+        return isString(collection) ? stringSize(collection) : collection.length;
       }
-      if (isObjectLike(collection)) {
-        var tag = getTag(collection);
-        if (tag == mapTag || tag == setTag) {
-          return collection.size;
-        }
+      var tag = getTag(collection);
+      if (tag == mapTag || tag == setTag) {
+        return collection.size;
       }
-      return keys(collection).length;
+      return baseKeys(collection).length;
     }
 
     /**
@@ -11611,8 +12378,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @since 0.1.0
      * @category Collection
      * @param {Array|Object} collection The collection to iterate over.
-     * @param {Array|Function|Object|string} [predicate=_.identity]
-     *  The function invoked per iteration.
+     * @param {Function} [predicate=_.identity] The function invoked per iteration.
      * @param- {Object} [guard] Enables use as an iteratee for methods like `_.map`.
      * @returns {boolean} Returns `true` if any element passes the predicate check,
      *  else `false`.
@@ -11657,8 +12423,8 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @since 0.1.0
      * @category Collection
      * @param {Array|Object} collection The collection to iterate over.
-     * @param {...(Array|Array[]|Function|Function[]|Object|Object[]|string|string[])}
-     *  [iteratees=[_.identity]] The iteratees to sort by.
+     * @param {...(Function|Function[])} [iteratees=[_.identity]]
+     *  The iteratees to sort by.
      * @returns {Array} Returns the new sorted array.
      * @example
      *
@@ -11669,18 +12435,13 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      *   { 'user': 'barney', 'age': 34 }
      * ];
      *
-     * _.sortBy(users, function(o) { return o.user; });
+     * _.sortBy(users, [function(o) { return o.user; }]);
      * // => objects for [['barney', 36], ['barney', 34], ['fred', 48], ['fred', 40]]
      *
      * _.sortBy(users, ['user', 'age']);
      * // => objects for [['barney', 34], ['barney', 36], ['fred', 40], ['fred', 48]]
-     *
-     * _.sortBy(users, 'user', function(o) {
-     *   return Math.floor(o.age / 10);
-     * });
-     * // => objects for [['barney', 36], ['barney', 34], ['fred', 48], ['fred', 40]]
      */
-    var sortBy = rest(function(collection, iteratees) {
+    var sortBy = baseRest(function(collection, iteratees) {
       if (collection == null) {
         return [];
       }
@@ -11690,11 +12451,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
       } else if (length > 2 && isIterateeCall(iteratees[0], iteratees[1], iteratees[2])) {
         iteratees = [iteratees[0]];
       }
-      iteratees = (iteratees.length == 1 && isArray(iteratees[0]))
-        ? iteratees[0]
-        : baseFlatten(iteratees, 1, isFlattenableIteratee);
-
-      return baseOrderBy(collection, iteratees, []);
+      return baseOrderBy(collection, baseFlatten(iteratees, 1), []);
     });
 
     /*------------------------------------------------------------------------*/
@@ -11715,9 +12472,9 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * }, _.now());
      * // => Logs the number of milliseconds it took for the deferred invocation.
      */
-    function now() {
-      return Date.now();
-    }
+    var now = ctxNow || function() {
+      return root.Date.now();
+    };
 
     /*------------------------------------------------------------------------*/
 
@@ -11777,7 +12534,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
     function ary(func, n, guard) {
       n = guard ? undefined : n;
       n = (func && n == null) ? func.length : n;
-      return createWrapper(func, ARY_FLAG, undefined, undefined, undefined, undefined, n);
+      return createWrap(func, WRAP_ARY_FLAG, undefined, undefined, undefined, undefined, n);
     }
 
     /**
@@ -11795,7 +12552,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @example
      *
      * jQuery(element).on('click', _.before(5, addContactToList));
-     * // => allows adding up to 4 contacts to the list
+     * // => Allows adding up to 4 contacts to the list.
      */
     function before(n, func) {
       var result;
@@ -11834,9 +12591,9 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @returns {Function} Returns the new bound function.
      * @example
      *
-     * var greet = function(greeting, punctuation) {
+     * function greet(greeting, punctuation) {
      *   return greeting + ' ' + this.user + punctuation;
-     * };
+     * }
      *
      * var object = { 'user': 'fred' };
      *
@@ -11849,13 +12606,13 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * bound('hi');
      * // => 'hi fred!'
      */
-    var bind = rest(function(func, thisArg, partials) {
-      var bitmask = BIND_FLAG;
+    var bind = baseRest(function(func, thisArg, partials) {
+      var bitmask = WRAP_BIND_FLAG;
       if (partials.length) {
         var holders = replaceHolders(partials, getHolder(bind));
-        bitmask |= PARTIAL_FLAG;
+        bitmask |= WRAP_PARTIAL_FLAG;
       }
-      return createWrapper(func, bitmask, thisArg, partials, holders);
+      return createWrap(func, bitmask, thisArg, partials, holders);
     });
 
     /**
@@ -11903,13 +12660,13 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * bound('hi');
      * // => 'hiya fred!'
      */
-    var bindKey = rest(function(object, key, partials) {
-      var bitmask = BIND_FLAG | BIND_KEY_FLAG;
+    var bindKey = baseRest(function(object, key, partials) {
+      var bitmask = WRAP_BIND_FLAG | WRAP_BIND_KEY_FLAG;
       if (partials.length) {
         var holders = replaceHolders(partials, getHolder(bindKey));
-        bitmask |= PARTIAL_FLAG;
+        bitmask |= WRAP_PARTIAL_FLAG;
       }
-      return createWrapper(key, bitmask, object, partials, holders);
+      return createWrap(key, bitmask, object, partials, holders);
     });
 
     /**
@@ -11955,7 +12712,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      */
     function curry(func, arity, guard) {
       arity = guard ? undefined : arity;
-      var result = createWrapper(func, CURRY_FLAG, undefined, undefined, undefined, undefined, undefined, arity);
+      var result = createWrap(func, WRAP_CURRY_FLAG, undefined, undefined, undefined, undefined, undefined, arity);
       result.placeholder = curry.placeholder;
       return result;
     }
@@ -12000,7 +12757,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      */
     function curryRight(func, arity, guard) {
       arity = guard ? undefined : arity;
-      var result = createWrapper(func, CURRY_RIGHT_FLAG, undefined, undefined, undefined, undefined, undefined, arity);
+      var result = createWrap(func, WRAP_CURRY_RIGHT_FLAG, undefined, undefined, undefined, undefined, undefined, arity);
       result.placeholder = curryRight.placeholder;
       return result;
     }
@@ -12010,14 +12767,18 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * milliseconds have elapsed since the last time the debounced function was
      * invoked. The debounced function comes with a `cancel` method to cancel
      * delayed `func` invocations and a `flush` method to immediately invoke them.
-     * Provide an options object to indicate whether `func` should be invoked on
-     * the leading and/or trailing edge of the `wait` timeout. The `func` is invoked
-     * with the last arguments provided to the debounced function. Subsequent calls
-     * to the debounced function return the result of the last `func` invocation.
+     * Provide `options` to indicate whether `func` should be invoked on the
+     * leading and/or trailing edge of the `wait` timeout. The `func` is invoked
+     * with the last arguments provided to the debounced function. Subsequent
+     * calls to the debounced function return the result of the last `func`
+     * invocation.
      *
-     * **Note:** If `leading` and `trailing` options are `true`, `func` is invoked
-     * on the trailing edge of the timeout only if the debounced function is
-     * invoked more than once during the `wait` timeout.
+     * **Note:** If `leading` and `trailing` options are `true`, `func` is
+     * invoked on the trailing edge of the timeout only if the debounced function
+     * is invoked more than once during the `wait` timeout.
+     *
+     * If `wait` is `0` and `leading` is `false`, `func` invocation is deferred
+     * until to the next tick, similar to `setTimeout` with a timeout of `0`.
      *
      * See [David Corbacho's article](https://css-tricks.com/debouncing-throttling-explained-examples/)
      * for details over the differences between `_.debounce` and `_.throttle`.
@@ -12138,6 +12899,9 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
       }
 
       function cancel() {
+        if (timerId !== undefined) {
+          clearTimeout(timerId);
+        }
         lastInvokeTime = 0;
         lastArgs = lastCallTime = lastThis = timerId = undefined;
       }
@@ -12190,9 +12954,9 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * _.defer(function(text) {
      *   console.log(text);
      * }, 'deferred');
-     * // => Logs 'deferred' after one or more milliseconds.
+     * // => Logs 'deferred' after one millisecond.
      */
-    var defer = rest(function(func, args) {
+    var defer = baseRest(function(func, args) {
       return baseDelay(func, 1, args);
     });
 
@@ -12215,7 +12979,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * }, 1000, 'later');
      * // => Logs 'later' after one second.
      */
-    var delay = rest(function(func, wait, args) {
+    var delay = baseRest(function(func, wait, args) {
       return baseDelay(func, toNumber(wait) || 0, args);
     });
 
@@ -12238,7 +13002,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * // => ['d', 'c', 'b', 'a']
      */
     function flip(func) {
-      return createWrapper(func, FLIP_FLAG);
+      return createWrap(func, WRAP_FLIP_FLAG);
     }
 
     /**
@@ -12251,8 +13015,8 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * **Note:** The cache is exposed as the `cache` property on the memoized
      * function. Its creation may be customized by replacing the `_.memoize.Cache`
      * constructor with one whose instances implement the
-     * [`Map`](http://ecma-international.org/ecma-262/6.0/#sec-properties-of-the-map-prototype-object)
-     * method interface of `delete`, `get`, `has`, and `set`.
+     * [`Map`](http://ecma-international.org/ecma-262/7.0/#sec-properties-of-the-map-prototype-object)
+     * method interface of `clear`, `delete`, `get`, `has`, and `set`.
      *
      * @static
      * @memberOf _
@@ -12286,7 +13050,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * _.memoize.Cache = WeakMap;
      */
     function memoize(func, resolver) {
-      if (typeof func != 'function' || (resolver && typeof resolver != 'function')) {
+      if (typeof func != 'function' || (resolver != null && typeof resolver != 'function')) {
         throw new TypeError(FUNC_ERROR_TEXT);
       }
       var memoized = function() {
@@ -12298,14 +13062,14 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
           return cache.get(key);
         }
         var result = func.apply(this, args);
-        memoized.cache = cache.set(key, result);
+        memoized.cache = cache.set(key, result) || cache;
         return result;
       };
       memoized.cache = new (memoize.Cache || MapCache);
       return memoized;
     }
 
-    // Assign cache to `_.memoize`.
+    // Expose `MapCache`.
     memoize.Cache = MapCache;
 
     /**
@@ -12333,7 +13097,14 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
         throw new TypeError(FUNC_ERROR_TEXT);
       }
       return function() {
-        return !predicate.apply(this, arguments);
+        var args = arguments;
+        switch (args.length) {
+          case 0: return !predicate.call(this);
+          case 1: return !predicate.call(this, args[0]);
+          case 2: return !predicate.call(this, args[0], args[1]);
+          case 3: return !predicate.call(this, args[0], args[1], args[2]);
+        }
+        return !predicate.apply(this, args);
       };
     }
 
@@ -12353,23 +13124,22 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * var initialize = _.once(createApplication);
      * initialize();
      * initialize();
-     * // `initialize` invokes `createApplication` once
+     * // => `createApplication` is invoked once
      */
     function once(func) {
       return before(2, func);
     }
 
     /**
-     * Creates a function that invokes `func` with arguments transformed by
-     * corresponding `transforms`.
+     * Creates a function that invokes `func` with its arguments transformed.
      *
      * @static
      * @since 4.0.0
      * @memberOf _
      * @category Function
      * @param {Function} func The function to wrap.
-     * @param {...(Array|Array[]|Function|Function[]|Object|Object[]|string|string[])}
-     *  [transforms[_.identity]] The functions to transform.
+     * @param {...(Function|Function[])} [transforms=[_.identity]]
+     *  The argument transforms.
      * @returns {Function} Returns the new function.
      * @example
      *
@@ -12391,13 +13161,13 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * func(10, 5);
      * // => [100, 10]
      */
-    var overArgs = rest(function(func, transforms) {
+    var overArgs = castRest(function(func, transforms) {
       transforms = (transforms.length == 1 && isArray(transforms[0]))
         ? arrayMap(transforms[0], baseUnary(getIteratee()))
-        : arrayMap(baseFlatten(transforms, 1, isFlattenableIteratee), baseUnary(getIteratee()));
+        : arrayMap(baseFlatten(transforms, 1), baseUnary(getIteratee()));
 
       var funcsLength = transforms.length;
-      return rest(function(args) {
+      return baseRest(function(args) {
         var index = -1,
             length = nativeMin(args.length, funcsLength);
 
@@ -12428,9 +13198,9 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @returns {Function} Returns the new partially applied function.
      * @example
      *
-     * var greet = function(greeting, name) {
+     * function greet(greeting, name) {
      *   return greeting + ' ' + name;
-     * };
+     * }
      *
      * var sayHelloTo = _.partial(greet, 'hello');
      * sayHelloTo('fred');
@@ -12441,9 +13211,9 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * greetFred('hi');
      * // => 'hi fred'
      */
-    var partial = rest(function(func, partials) {
+    var partial = baseRest(function(func, partials) {
       var holders = replaceHolders(partials, getHolder(partial));
-      return createWrapper(func, PARTIAL_FLAG, undefined, partials, holders);
+      return createWrap(func, WRAP_PARTIAL_FLAG, undefined, partials, holders);
     });
 
     /**
@@ -12465,9 +13235,9 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @returns {Function} Returns the new partially applied function.
      * @example
      *
-     * var greet = function(greeting, name) {
+     * function greet(greeting, name) {
      *   return greeting + ' ' + name;
-     * };
+     * }
      *
      * var greetFred = _.partialRight(greet, 'fred');
      * greetFred('hi');
@@ -12478,9 +13248,9 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * sayHelloTo('fred');
      * // => 'hello fred'
      */
-    var partialRight = rest(function(func, partials) {
+    var partialRight = baseRest(function(func, partials) {
       var holders = replaceHolders(partials, getHolder(partialRight));
-      return createWrapper(func, PARTIAL_RIGHT_FLAG, undefined, partials, holders);
+      return createWrap(func, WRAP_PARTIAL_RIGHT_FLAG, undefined, partials, holders);
     });
 
     /**
@@ -12505,8 +13275,8 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * rearged('b', 'c', 'a')
      * // => ['a', 'b', 'c']
      */
-    var rearg = rest(function(func, indexes) {
-      return createWrapper(func, REARG_FLAG, undefined, undefined, undefined, baseFlatten(indexes, 1));
+    var rearg = flatRest(function(func, indexes) {
+      return createWrap(func, WRAP_REARG_FLAG, undefined, undefined, undefined, indexes);
     });
 
     /**
@@ -12538,35 +13308,14 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
       if (typeof func != 'function') {
         throw new TypeError(FUNC_ERROR_TEXT);
       }
-      start = nativeMax(start === undefined ? (func.length - 1) : toInteger(start), 0);
-      return function() {
-        var args = arguments,
-            index = -1,
-            length = nativeMax(args.length - start, 0),
-            array = Array(length);
-
-        while (++index < length) {
-          array[index] = args[start + index];
-        }
-        switch (start) {
-          case 0: return func.call(this, array);
-          case 1: return func.call(this, args[0], array);
-          case 2: return func.call(this, args[0], args[1], array);
-        }
-        var otherArgs = Array(start + 1);
-        index = -1;
-        while (++index < start) {
-          otherArgs[index] = args[index];
-        }
-        otherArgs[start] = array;
-        return apply(func, this, otherArgs);
-      };
+      start = start === undefined ? start : toInteger(start);
+      return baseRest(func, start);
     }
 
     /**
      * Creates a function that invokes `func` with the `this` binding of the
      * create function and an array of arguments much like
-     * [`Function#apply`](http://www.ecma-international.org/ecma-262/6.0/#sec-function.prototype.apply).
+     * [`Function#apply`](http://www.ecma-international.org/ecma-262/7.0/#sec-function.prototype.apply).
      *
      * **Note:** This method is based on the
      * [spread operator](https://mdn.io/spread_operator).
@@ -12602,7 +13351,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
         throw new TypeError(FUNC_ERROR_TEXT);
       }
       start = start === undefined ? 0 : nativeMax(toInteger(start), 0);
-      return rest(function(args) {
+      return baseRest(function(args) {
         var array = args[start],
             otherArgs = castSlice(args, 0, start);
 
@@ -12617,8 +13366,8 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * Creates a throttled function that only invokes `func` at most once per
      * every `wait` milliseconds. The throttled function comes with a `cancel`
      * method to cancel delayed `func` invocations and a `flush` method to
-     * immediately invoke them. Provide an options object to indicate whether
-     * `func` should be invoked on the leading and/or trailing edge of the `wait`
+     * immediately invoke them. Provide `options` to indicate whether `func`
+     * should be invoked on the leading and/or trailing edge of the `wait`
      * timeout. The `func` is invoked with the last arguments provided to the
      * throttled function. Subsequent calls to the throttled function return the
      * result of the last `func` invocation.
@@ -12626,6 +13375,9 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * **Note:** If `leading` and `trailing` options are `true`, `func` is
      * invoked on the trailing edge of the timeout only if the throttled function
      * is invoked more than once during the `wait` timeout.
+     *
+     * If `wait` is `0` and `leading` is `false`, `func` invocation is deferred
+     * until to the next tick, similar to `setTimeout` with a timeout of `0`.
      *
      * See [David Corbacho's article](https://css-tricks.com/debouncing-throttling-explained-examples/)
      * for details over the differences between `_.throttle` and `_.debounce`.
@@ -12692,10 +13444,10 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
     }
 
     /**
-     * Creates a function that provides `value` to the wrapper function as its
-     * first argument. Any additional arguments provided to the function are
-     * appended to those provided to the wrapper function. The wrapper is invoked
-     * with the `this` binding of the created function.
+     * Creates a function that provides `value` to `wrapper` as its first
+     * argument. Any additional arguments provided to the function are appended
+     * to those provided to the `wrapper`. The wrapper is invoked with the `this`
+     * binding of the created function.
      *
      * @static
      * @memberOf _
@@ -12714,8 +13466,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * // => '<p>fred, barney, &amp; pebbles</p>'
      */
     function wrap(value, wrapper) {
-      wrapper = wrapper == null ? identity : wrapper;
-      return partial(wrapper, value);
+      return partial(castFunction(wrapper), value);
     }
 
     /*------------------------------------------------------------------------*/
@@ -12788,7 +13539,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * // => true
      */
     function clone(value) {
-      return baseClone(value, false, true);
+      return baseClone(value, CLONE_SYMBOLS_FLAG);
     }
 
     /**
@@ -12823,7 +13574,8 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * // => 0
      */
     function cloneWith(value, customizer) {
-      return baseClone(value, false, true, customizer);
+      customizer = typeof customizer == 'function' ? customizer : undefined;
+      return baseClone(value, CLONE_SYMBOLS_FLAG, customizer);
     }
 
     /**
@@ -12845,7 +13597,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * // => false
      */
     function cloneDeep(value) {
-      return baseClone(value, true, true);
+      return baseClone(value, CLONE_DEEP_FLAG | CLONE_SYMBOLS_FLAG);
     }
 
     /**
@@ -12877,12 +13629,41 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * // => 20
      */
     function cloneDeepWith(value, customizer) {
-      return baseClone(value, true, true, customizer);
+      customizer = typeof customizer == 'function' ? customizer : undefined;
+      return baseClone(value, CLONE_DEEP_FLAG | CLONE_SYMBOLS_FLAG, customizer);
+    }
+
+    /**
+     * Checks if `object` conforms to `source` by invoking the predicate
+     * properties of `source` with the corresponding property values of `object`.
+     *
+     * **Note:** This method is equivalent to `_.conforms` when `source` is
+     * partially applied.
+     *
+     * @static
+     * @memberOf _
+     * @since 4.14.0
+     * @category Lang
+     * @param {Object} object The object to inspect.
+     * @param {Object} source The object of property predicates to conform to.
+     * @returns {boolean} Returns `true` if `object` conforms, else `false`.
+     * @example
+     *
+     * var object = { 'a': 1, 'b': 2 };
+     *
+     * _.conformsTo(object, { 'b': function(n) { return n > 1; } });
+     * // => true
+     *
+     * _.conformsTo(object, { 'b': function(n) { return n > 2; } });
+     * // => false
+     */
+    function conformsTo(object, source) {
+      return source == null || baseConformsTo(object, source, keys(source));
     }
 
     /**
      * Performs a
-     * [`SameValueZero`](http://ecma-international.org/ecma-262/6.0/#sec-samevaluezero)
+     * [`SameValueZero`](http://ecma-international.org/ecma-262/7.0/#sec-samevaluezero)
      * comparison between two values to determine if they are equivalent.
      *
      * @static
@@ -12894,8 +13675,8 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @returns {boolean} Returns `true` if the values are equivalent, else `false`.
      * @example
      *
-     * var object = { 'user': 'fred' };
-     * var other = { 'user': 'fred' };
+     * var object = { 'a': 1 };
+     * var other = { 'a': 1 };
      *
      * _.eq(object, object);
      * // => true
@@ -12976,7 +13757,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @since 0.1.0
      * @category Lang
      * @param {*} value The value to check.
-     * @returns {boolean} Returns `true` if `value` is correctly classified,
+     * @returns {boolean} Returns `true` if `value` is an `arguments` object,
      *  else `false`.
      * @example
      *
@@ -12986,11 +13767,10 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * _.isArguments([1, 2, 3]);
      * // => false
      */
-    function isArguments(value) {
-      // Safari 8.1 incorrectly makes `arguments.callee` enumerable in strict mode.
-      return isArrayLikeObject(value) && hasOwnProperty.call(value, 'callee') &&
-        (!propertyIsEnumerable.call(value, 'callee') || objectToString.call(value) == argsTag);
-    }
+    var isArguments = baseIsArguments(function() { return arguments; }()) ? baseIsArguments : function(value) {
+      return isObjectLike(value) && hasOwnProperty.call(value, 'callee') &&
+        !propertyIsEnumerable.call(value, 'callee');
+    };
 
     /**
      * Checks if `value` is classified as an `Array` object.
@@ -12998,11 +13778,9 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @static
      * @memberOf _
      * @since 0.1.0
-     * @type {Function}
      * @category Lang
      * @param {*} value The value to check.
-     * @returns {boolean} Returns `true` if `value` is correctly classified,
-     *  else `false`.
+     * @returns {boolean} Returns `true` if `value` is an array, else `false`.
      * @example
      *
      * _.isArray([1, 2, 3]);
@@ -13027,8 +13805,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @since 4.3.0
      * @category Lang
      * @param {*} value The value to check.
-     * @returns {boolean} Returns `true` if `value` is correctly classified,
-     *  else `false`.
+     * @returns {boolean} Returns `true` if `value` is an array buffer, else `false`.
      * @example
      *
      * _.isArrayBuffer(new ArrayBuffer(2));
@@ -13037,9 +13814,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * _.isArrayBuffer(new Array(2));
      * // => false
      */
-    function isArrayBuffer(value) {
-      return isObjectLike(value) && objectToString.call(value) == arrayBufferTag;
-    }
+    var isArrayBuffer = nodeIsArrayBuffer ? baseUnary(nodeIsArrayBuffer) : baseIsArrayBuffer;
 
     /**
      * Checks if `value` is array-like. A value is considered array-like if it's
@@ -13067,7 +13842,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * // => false
      */
     function isArrayLike(value) {
-      return value != null && isLength(getLength(value)) && !isFunction(value);
+      return value != null && isLength(value.length) && !isFunction(value);
     }
 
     /**
@@ -13107,8 +13882,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @since 0.1.0
      * @category Lang
      * @param {*} value The value to check.
-     * @returns {boolean} Returns `true` if `value` is correctly classified,
-     *  else `false`.
+     * @returns {boolean} Returns `true` if `value` is a boolean, else `false`.
      * @example
      *
      * _.isBoolean(false);
@@ -13119,7 +13893,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      */
     function isBoolean(value) {
       return value === true || value === false ||
-        (isObjectLike(value) && objectToString.call(value) == boolTag);
+        (isObjectLike(value) && baseGetTag(value) == boolTag);
     }
 
     /**
@@ -13139,9 +13913,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * _.isBuffer(new Uint8Array(2));
      * // => false
      */
-    var isBuffer = !Buffer ? stubFalse : function(value) {
-      return value instanceof Buffer;
-    };
+    var isBuffer = nativeIsBuffer || stubFalse;
 
     /**
      * Checks if `value` is classified as a `Date` object.
@@ -13151,8 +13923,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @since 0.1.0
      * @category Lang
      * @param {*} value The value to check.
-     * @returns {boolean} Returns `true` if `value` is correctly classified,
-     *  else `false`.
+     * @returns {boolean} Returns `true` if `value` is a date object, else `false`.
      * @example
      *
      * _.isDate(new Date);
@@ -13161,9 +13932,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * _.isDate('Mon April 23 2012');
      * // => false
      */
-    function isDate(value) {
-      return isObjectLike(value) && objectToString.call(value) == dateTag;
-    }
+    var isDate = nodeIsDate ? baseUnary(nodeIsDate) : baseIsDate;
 
     /**
      * Checks if `value` is likely a DOM element.
@@ -13173,8 +13942,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @since 0.1.0
      * @category Lang
      * @param {*} value The value to check.
-     * @returns {boolean} Returns `true` if `value` is a DOM element,
-     *  else `false`.
+     * @returns {boolean} Returns `true` if `value` is a DOM element, else `false`.
      * @example
      *
      * _.isElement(document.body);
@@ -13184,7 +13952,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * // => false
      */
     function isElement(value) {
-      return !!value && value.nodeType === 1 && isObjectLike(value) && !isPlainObject(value);
+      return isObjectLike(value) && value.nodeType === 1 && !isPlainObject(value);
     }
 
     /**
@@ -13221,23 +13989,27 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * // => false
      */
     function isEmpty(value) {
+      if (value == null) {
+        return true;
+      }
       if (isArrayLike(value) &&
-          (isArray(value) || isString(value) || isFunction(value.splice) ||
-            isArguments(value) || isBuffer(value))) {
+          (isArray(value) || typeof value == 'string' || typeof value.splice == 'function' ||
+            isBuffer(value) || isTypedArray(value) || isArguments(value))) {
         return !value.length;
       }
-      if (isObjectLike(value)) {
-        var tag = getTag(value);
-        if (tag == mapTag || tag == setTag) {
-          return !value.size;
-        }
+      var tag = getTag(value);
+      if (tag == mapTag || tag == setTag) {
+        return !value.size;
+      }
+      if (isPrototype(value)) {
+        return !baseKeys(value).length;
       }
       for (var key in value) {
         if (hasOwnProperty.call(value, key)) {
           return false;
         }
       }
-      return !(nonEnumShadows && keys(value).length);
+      return true;
     }
 
     /**
@@ -13256,12 +14028,11 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @category Lang
      * @param {*} value The value to compare.
      * @param {*} other The other value to compare.
-     * @returns {boolean} Returns `true` if the values are equivalent,
-     *  else `false`.
+     * @returns {boolean} Returns `true` if the values are equivalent, else `false`.
      * @example
      *
-     * var object = { 'user': 'fred' };
-     * var other = { 'user': 'fred' };
+     * var object = { 'a': 1 };
+     * var other = { 'a': 1 };
      *
      * _.isEqual(object, other);
      * // => true
@@ -13286,8 +14057,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @param {*} value The value to compare.
      * @param {*} other The other value to compare.
      * @param {Function} [customizer] The function to customize comparisons.
-     * @returns {boolean} Returns `true` if the values are equivalent,
-     *  else `false`.
+     * @returns {boolean} Returns `true` if the values are equivalent, else `false`.
      * @example
      *
      * function isGreeting(value) {
@@ -13309,7 +14079,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
     function isEqualWith(value, other, customizer) {
       customizer = typeof customizer == 'function' ? customizer : undefined;
       var result = customizer ? customizer(value, other) : undefined;
-      return result === undefined ? baseIsEqual(value, other, customizer) : !!result;
+      return result === undefined ? baseIsEqual(value, other, undefined, customizer) : !!result;
     }
 
     /**
@@ -13321,8 +14091,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @since 3.0.0
      * @category Lang
      * @param {*} value The value to check.
-     * @returns {boolean} Returns `true` if `value` is an error object,
-     *  else `false`.
+     * @returns {boolean} Returns `true` if `value` is an error object, else `false`.
      * @example
      *
      * _.isError(new Error);
@@ -13335,8 +14104,9 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
       if (!isObjectLike(value)) {
         return false;
       }
-      return (objectToString.call(value) == errorTag) ||
-        (typeof value.message == 'string' && typeof value.name == 'string');
+      var tag = baseGetTag(value);
+      return tag == errorTag || tag == domExcTag ||
+        (typeof value.message == 'string' && typeof value.name == 'string' && !isPlainObject(value));
     }
 
     /**
@@ -13350,8 +14120,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @since 0.1.0
      * @category Lang
      * @param {*} value The value to check.
-     * @returns {boolean} Returns `true` if `value` is a finite number,
-     *  else `false`.
+     * @returns {boolean} Returns `true` if `value` is a finite number, else `false`.
      * @example
      *
      * _.isFinite(3);
@@ -13378,8 +14147,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @since 0.1.0
      * @category Lang
      * @param {*} value The value to check.
-     * @returns {boolean} Returns `true` if `value` is correctly classified,
-     *  else `false`.
+     * @returns {boolean} Returns `true` if `value` is a function, else `false`.
      * @example
      *
      * _.isFunction(_);
@@ -13389,11 +14157,13 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * // => false
      */
     function isFunction(value) {
+      if (!isObject(value)) {
+        return false;
+      }
       // The use of `Object#toString` avoids issues with the `typeof` operator
-      // in Safari 8 which returns 'object' for typed array and weak map constructors,
-      // and PhantomJS 1.9 which returns 'function' for `NodeList` instances.
-      var tag = isObject(value) ? objectToString.call(value) : '';
-      return tag == funcTag || tag == genTag;
+      // in Safari 9 which returns 'object' for typed arrays and other constructors.
+      var tag = baseGetTag(value);
+      return tag == funcTag || tag == genTag || tag == asyncTag || tag == proxyTag;
     }
 
     /**
@@ -13429,16 +14199,15 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
     /**
      * Checks if `value` is a valid array-like length.
      *
-     * **Note:** This function is loosely based on
-     * [`ToLength`](http://ecma-international.org/ecma-262/6.0/#sec-tolength).
+     * **Note:** This method is loosely based on
+     * [`ToLength`](http://ecma-international.org/ecma-262/7.0/#sec-tolength).
      *
      * @static
      * @memberOf _
      * @since 4.0.0
      * @category Lang
      * @param {*} value The value to check.
-     * @returns {boolean} Returns `true` if `value` is a valid length,
-     *  else `false`.
+     * @returns {boolean} Returns `true` if `value` is a valid length, else `false`.
      * @example
      *
      * _.isLength(3);
@@ -13460,7 +14229,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
 
     /**
      * Checks if `value` is the
-     * [language type](http://www.ecma-international.org/ecma-262/6.0/#sec-ecmascript-language-types)
+     * [language type](http://www.ecma-international.org/ecma-262/7.0/#sec-ecmascript-language-types)
      * of `Object`. (e.g. arrays, functions, objects, regexes, `new Number(0)`, and `new String('')`)
      *
      * @static
@@ -13485,7 +14254,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      */
     function isObject(value) {
       var type = typeof value;
-      return !!value && (type == 'object' || type == 'function');
+      return value != null && (type == 'object' || type == 'function');
     }
 
     /**
@@ -13513,7 +14282,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * // => false
      */
     function isObjectLike(value) {
-      return !!value && typeof value == 'object';
+      return value != null && typeof value == 'object';
     }
 
     /**
@@ -13524,8 +14293,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @since 4.3.0
      * @category Lang
      * @param {*} value The value to check.
-     * @returns {boolean} Returns `true` if `value` is correctly classified,
-     *  else `false`.
+     * @returns {boolean} Returns `true` if `value` is a map, else `false`.
      * @example
      *
      * _.isMap(new Map);
@@ -13534,16 +14302,18 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * _.isMap(new WeakMap);
      * // => false
      */
-    function isMap(value) {
-      return isObjectLike(value) && getTag(value) == mapTag;
-    }
+    var isMap = nodeIsMap ? baseUnary(nodeIsMap) : baseIsMap;
 
     /**
      * Performs a partial deep comparison between `object` and `source` to
-     * determine if `object` contains equivalent property values. This method is
-     * equivalent to a `_.matches` function when `source` is partially applied.
+     * determine if `object` contains equivalent property values.
      *
-     * **Note:** This method supports comparing the same values as `_.isEqual`.
+     * **Note:** This method is equivalent to `_.matches` when `source` is
+     * partially applied.
+     *
+     * Partial comparisons will match empty array and empty object `source`
+     * values against any array or object value, respectively. See `_.isEqual`
+     * for a list of supported value comparisons.
      *
      * @static
      * @memberOf _
@@ -13554,12 +14324,12 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @returns {boolean} Returns `true` if `object` is a match, else `false`.
      * @example
      *
-     * var object = { 'user': 'fred', 'age': 40 };
+     * var object = { 'a': 1, 'b': 2 };
      *
-     * _.isMatch(object, { 'age': 40 });
+     * _.isMatch(object, { 'b': 2 });
      * // => true
      *
-     * _.isMatch(object, { 'age': 36 });
+     * _.isMatch(object, { 'b': 1 });
      * // => false
      */
     function isMatch(object, source) {
@@ -13641,13 +14411,13 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
     /**
      * Checks if `value` is a pristine native function.
      *
-     * **Note:** This method can't reliably detect native functions in the
-     * presence of the `core-js` package because `core-js` circumvents this kind
-     * of detection. Despite multiple requests, the `core-js` maintainer has made
-     * it clear: any attempt to fix the detection will be obstructed. As a result,
-     * we're left with little choice but to throw an error. Unfortunately, this
-     * also affects packages, like [babel-polyfill](https://www.npmjs.com/package/babel-polyfill),
-     * which rely on `core-js`.
+     * **Note:** This method can't reliably detect native functions in the presence
+     * of the core-js package because core-js circumvents this kind of detection.
+     * Despite multiple requests, the core-js maintainer has made it clear: any
+     * attempt to fix the detection will be obstructed. As a result, we're left
+     * with little choice but to throw an error. Unfortunately, this also affects
+     * packages, like [babel-polyfill](https://www.npmjs.com/package/babel-polyfill),
+     * which rely on core-js.
      *
      * @static
      * @memberOf _
@@ -13666,7 +14436,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      */
     function isNative(value) {
       if (isMaskable(value)) {
-        throw new Error('This method is not supported with `core-js`. Try https://github.com/es-shims.');
+        throw new Error(CORE_ERROR_TEXT);
       }
       return baseIsNative(value);
     }
@@ -13727,8 +14497,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @since 0.1.0
      * @category Lang
      * @param {*} value The value to check.
-     * @returns {boolean} Returns `true` if `value` is correctly classified,
-     *  else `false`.
+     * @returns {boolean} Returns `true` if `value` is a number, else `false`.
      * @example
      *
      * _.isNumber(3);
@@ -13745,7 +14514,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      */
     function isNumber(value) {
       return typeof value == 'number' ||
-        (isObjectLike(value) && objectToString.call(value) == numberTag);
+        (isObjectLike(value) && baseGetTag(value) == numberTag);
     }
 
     /**
@@ -13757,8 +14526,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @since 0.8.0
      * @category Lang
      * @param {*} value The value to check.
-     * @returns {boolean} Returns `true` if `value` is a plain object,
-     *  else `false`.
+     * @returns {boolean} Returns `true` if `value` is a plain object, else `false`.
      * @example
      *
      * function Foo() {
@@ -13778,8 +14546,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * // => true
      */
     function isPlainObject(value) {
-      if (!isObjectLike(value) ||
-          objectToString.call(value) != objectTag || isHostObject(value)) {
+      if (!isObjectLike(value) || baseGetTag(value) != objectTag) {
         return false;
       }
       var proto = getPrototype(value);
@@ -13787,8 +14554,8 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
         return true;
       }
       var Ctor = hasOwnProperty.call(proto, 'constructor') && proto.constructor;
-      return (typeof Ctor == 'function' &&
-        Ctor instanceof Ctor && funcToString.call(Ctor) == objectCtorString);
+      return typeof Ctor == 'function' && Ctor instanceof Ctor &&
+        funcToString.call(Ctor) == objectCtorString;
     }
 
     /**
@@ -13799,8 +14566,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @since 0.1.0
      * @category Lang
      * @param {*} value The value to check.
-     * @returns {boolean} Returns `true` if `value` is correctly classified,
-     *  else `false`.
+     * @returns {boolean} Returns `true` if `value` is a regexp, else `false`.
      * @example
      *
      * _.isRegExp(/abc/);
@@ -13809,9 +14575,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * _.isRegExp('/abc/');
      * // => false
      */
-    function isRegExp(value) {
-      return isObject(value) && objectToString.call(value) == regexpTag;
-    }
+    var isRegExp = nodeIsRegExp ? baseUnary(nodeIsRegExp) : baseIsRegExp;
 
     /**
      * Checks if `value` is a safe integer. An integer is safe if it's an IEEE-754
@@ -13825,8 +14589,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @since 4.0.0
      * @category Lang
      * @param {*} value The value to check.
-     * @returns {boolean} Returns `true` if `value` is a safe integer,
-     *  else `false`.
+     * @returns {boolean} Returns `true` if `value` is a safe integer, else `false`.
      * @example
      *
      * _.isSafeInteger(3);
@@ -13853,8 +14616,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @since 4.3.0
      * @category Lang
      * @param {*} value The value to check.
-     * @returns {boolean} Returns `true` if `value` is correctly classified,
-     *  else `false`.
+     * @returns {boolean} Returns `true` if `value` is a set, else `false`.
      * @example
      *
      * _.isSet(new Set);
@@ -13863,9 +14625,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * _.isSet(new WeakSet);
      * // => false
      */
-    function isSet(value) {
-      return isObjectLike(value) && getTag(value) == setTag;
-    }
+    var isSet = nodeIsSet ? baseUnary(nodeIsSet) : baseIsSet;
 
     /**
      * Checks if `value` is classified as a `String` primitive or object.
@@ -13875,8 +14635,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @memberOf _
      * @category Lang
      * @param {*} value The value to check.
-     * @returns {boolean} Returns `true` if `value` is correctly classified,
-     *  else `false`.
+     * @returns {boolean} Returns `true` if `value` is a string, else `false`.
      * @example
      *
      * _.isString('abc');
@@ -13887,7 +14646,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      */
     function isString(value) {
       return typeof value == 'string' ||
-        (!isArray(value) && isObjectLike(value) && objectToString.call(value) == stringTag);
+        (!isArray(value) && isObjectLike(value) && baseGetTag(value) == stringTag);
     }
 
     /**
@@ -13898,8 +14657,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @since 4.0.0
      * @category Lang
      * @param {*} value The value to check.
-     * @returns {boolean} Returns `true` if `value` is correctly classified,
-     *  else `false`.
+     * @returns {boolean} Returns `true` if `value` is a symbol, else `false`.
      * @example
      *
      * _.isSymbol(Symbol.iterator);
@@ -13910,7 +14668,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      */
     function isSymbol(value) {
       return typeof value == 'symbol' ||
-        (isObjectLike(value) && objectToString.call(value) == symbolTag);
+        (isObjectLike(value) && baseGetTag(value) == symbolTag);
     }
 
     /**
@@ -13921,8 +14679,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @since 3.0.0
      * @category Lang
      * @param {*} value The value to check.
-     * @returns {boolean} Returns `true` if `value` is correctly classified,
-     *  else `false`.
+     * @returns {boolean} Returns `true` if `value` is a typed array, else `false`.
      * @example
      *
      * _.isTypedArray(new Uint8Array);
@@ -13931,10 +14688,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * _.isTypedArray([]);
      * // => false
      */
-    function isTypedArray(value) {
-      return isObjectLike(value) &&
-        isLength(value.length) && !!typedArrayTags[objectToString.call(value)];
-    }
+    var isTypedArray = nodeIsTypedArray ? baseUnary(nodeIsTypedArray) : baseIsTypedArray;
 
     /**
      * Checks if `value` is `undefined`.
@@ -13965,8 +14719,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @since 4.3.0
      * @category Lang
      * @param {*} value The value to check.
-     * @returns {boolean} Returns `true` if `value` is correctly classified,
-     *  else `false`.
+     * @returns {boolean} Returns `true` if `value` is a weak map, else `false`.
      * @example
      *
      * _.isWeakMap(new WeakMap);
@@ -13987,8 +14740,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @since 4.3.0
      * @category Lang
      * @param {*} value The value to check.
-     * @returns {boolean} Returns `true` if `value` is correctly classified,
-     *  else `false`.
+     * @returns {boolean} Returns `true` if `value` is a weak set, else `false`.
      * @example
      *
      * _.isWeakSet(new WeakSet);
@@ -13998,7 +14750,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * // => false
      */
     function isWeakSet(value) {
-      return isObjectLike(value) && objectToString.call(value) == weakSetTag;
+      return isObjectLike(value) && baseGetTag(value) == weakSetTag;
     }
 
     /**
@@ -14083,8 +14835,8 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
       if (isArrayLike(value)) {
         return isString(value) ? stringToArray(value) : copyArray(value);
       }
-      if (iteratorSymbol && value[iteratorSymbol]) {
-        return iteratorToArray(value[iteratorSymbol]());
+      if (symIterator && value[symIterator]) {
+        return iteratorToArray(value[symIterator]());
       }
       var tag = getTag(value),
           func = tag == mapTag ? mapToArray : (tag == setTag ? setToArray : values);
@@ -14131,7 +14883,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * Converts `value` to an integer.
      *
      * **Note:** This method is loosely based on
-     * [`ToInteger`](http://www.ecma-international.org/ecma-262/6.0/#sec-tointeger).
+     * [`ToInteger`](http://www.ecma-international.org/ecma-262/7.0/#sec-tointeger).
      *
      * @static
      * @memberOf _
@@ -14165,7 +14917,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * array-like object.
      *
      * **Note:** This method is based on
-     * [`ToLength`](http://ecma-international.org/ecma-262/6.0/#sec-tolength).
+     * [`ToLength`](http://ecma-international.org/ecma-262/7.0/#sec-tolength).
      *
      * @static
      * @memberOf _
@@ -14222,7 +14974,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
         return NAN;
       }
       if (isObject(value)) {
-        var other = isFunction(value.valueOf) ? value.valueOf() : value;
+        var other = typeof value.valueOf == 'function' ? value.valueOf() : value;
         value = isObject(other) ? (other + '') : other;
       }
       if (typeof value != 'string') {
@@ -14299,8 +15051,8 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @memberOf _
      * @since 4.0.0
      * @category Lang
-     * @param {*} value The value to process.
-     * @returns {string} Returns the string.
+     * @param {*} value The value to convert.
+     * @returns {string} Returns the converted string.
      * @example
      *
      * _.toString(null);
@@ -14337,21 +15089,21 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @example
      *
      * function Foo() {
-     *   this.c = 3;
+     *   this.a = 1;
      * }
      *
      * function Bar() {
-     *   this.e = 5;
+     *   this.c = 3;
      * }
      *
-     * Foo.prototype.d = 4;
-     * Bar.prototype.f = 6;
+     * Foo.prototype.b = 2;
+     * Bar.prototype.d = 4;
      *
-     * _.assign({ 'a': 1 }, new Foo, new Bar);
-     * // => { 'a': 1, 'c': 3, 'e': 5 }
+     * _.assign({ 'a': 0 }, new Foo, new Bar);
+     * // => { 'a': 1, 'c': 3 }
      */
     var assign = createAssigner(function(object, source) {
-      if (nonEnumShadows || isPrototype(source) || isArrayLike(source)) {
+      if (isPrototype(source) || isArrayLike(source)) {
         copyObject(source, keys(source), object);
         return;
       }
@@ -14380,27 +15132,21 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @example
      *
      * function Foo() {
-     *   this.b = 2;
+     *   this.a = 1;
      * }
      *
      * function Bar() {
-     *   this.d = 4;
+     *   this.c = 3;
      * }
      *
-     * Foo.prototype.c = 3;
-     * Bar.prototype.e = 5;
+     * Foo.prototype.b = 2;
+     * Bar.prototype.d = 4;
      *
-     * _.assignIn({ 'a': 1 }, new Foo, new Bar);
-     * // => { 'a': 1, 'b': 2, 'c': 3, 'd': 4, 'e': 5 }
+     * _.assignIn({ 'a': 0 }, new Foo, new Bar);
+     * // => { 'a': 1, 'b': 2, 'c': 3, 'd': 4 }
      */
     var assignIn = createAssigner(function(object, source) {
-      if (nonEnumShadows || isPrototype(source) || isArrayLike(source)) {
-        copyObject(source, keysIn(source), object);
-        return;
-      }
-      for (var key in source) {
-        assignValue(object, key, source[key]);
-      }
+      copyObject(source, keysIn(source), object);
     });
 
     /**
@@ -14476,7 +15222,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @since 1.0.0
      * @category Object
      * @param {Object} object The object to iterate over.
-     * @param {...(string|string[])} [paths] The property paths of elements to pick.
+     * @param {...(string|string[])} [paths] The property paths to pick.
      * @returns {Array} Returns the picked values.
      * @example
      *
@@ -14485,9 +15231,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * _.at(object, ['a[0].b.c', 'a[1]']);
      * // => [3, 4]
      */
-    var at = rest(function(object, paths) {
-      return baseAt(object, baseFlatten(paths, 1));
-    });
+    var at = flatRest(baseAt);
 
     /**
      * Creates an object that inherits from the `prototype` object. If a
@@ -14525,7 +15269,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      */
     function create(prototype, properties) {
       var result = baseCreate(prototype);
-      return properties ? baseAssign(result, properties) : result;
+      return properties == null ? result : baseAssign(result, properties);
     }
 
     /**
@@ -14546,10 +15290,10 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @see _.defaultsDeep
      * @example
      *
-     * _.defaults({ 'user': 'barney' }, { 'age': 36 }, { 'user': 'fred' });
-     * // => { 'user': 'barney', 'age': 36 }
+     * _.defaults({ 'a': 1 }, { 'b': 2 }, { 'a': 3 });
+     * // => { 'a': 1, 'b': 2 }
      */
-    var defaults = rest(function(args) {
+    var defaults = baseRest(function(args) {
       args.push(undefined, assignInDefaults);
       return apply(assignInWith, undefined, args);
     });
@@ -14570,11 +15314,10 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @see _.defaults
      * @example
      *
-     * _.defaultsDeep({ 'user': { 'name': 'barney' } }, { 'user': { 'name': 'fred', 'age': 36 } });
-     * // => { 'user': { 'name': 'barney', 'age': 36 } }
-     *
+     * _.defaultsDeep({ 'a': { 'b': 2 } }, { 'a': { 'b': 1, 'c': 3 } });
+     * // => { 'a': { 'b': 2, 'c': 3 } }
      */
-    var defaultsDeep = rest(function(args) {
+    var defaultsDeep = baseRest(function(args) {
       args.push(undefined, mergeDefaults);
       return apply(mergeWith, undefined, args);
     });
@@ -14587,9 +15330,8 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @memberOf _
      * @since 1.1.0
      * @category Object
-     * @param {Object} object The object to search.
-     * @param {Array|Function|Object|string} [predicate=_.identity]
-     *  The function invoked per iteration.
+     * @param {Object} object The object to inspect.
+     * @param {Function} [predicate=_.identity] The function invoked per iteration.
      * @returns {string|undefined} Returns the key of the matched element,
      *  else `undefined`.
      * @example
@@ -14627,9 +15369,8 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @memberOf _
      * @since 2.0.0
      * @category Object
-     * @param {Object} object The object to search.
-     * @param {Array|Function|Object|string} [predicate=_.identity]
-     *  The function invoked per iteration.
+     * @param {Object} object The object to inspect.
+     * @param {Function} [predicate=_.identity] The function invoked per iteration.
      * @returns {string|undefined} Returns the key of the matched element,
      *  else `undefined`.
      * @example
@@ -14843,7 +15584,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
 
     /**
      * Gets the value at `path` of `object`. If the resolved value is
-     * `undefined`, the `defaultValue` is used in its place.
+     * `undefined`, the `defaultValue` is returned in its place.
      *
      * @static
      * @memberOf _
@@ -14966,8 +15707,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @since 4.1.0
      * @category Object
      * @param {Object} object The object to invert.
-     * @param {Array|Function|Object|string} [iteratee=_.identity]
-     *  The iteratee invoked per element.
+     * @param {Function} [iteratee=_.identity] The iteratee invoked per element.
      * @returns {Object} Returns the new inverted object.
      * @example
      *
@@ -15007,13 +15747,13 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * _.invoke(object, 'a[0].b.c.slice', 1, 3);
      * // => [2, 3]
      */
-    var invoke = rest(baseInvoke);
+    var invoke = baseRest(baseInvoke);
 
     /**
      * Creates an array of the own enumerable property names of `object`.
      *
      * **Note:** Non-object values are coerced to objects. See the
-     * [ES spec](http://ecma-international.org/ecma-262/6.0/#sec-object.keys)
+     * [ES spec](http://ecma-international.org/ecma-262/7.0/#sec-object.keys)
      * for more details.
      *
      * @static
@@ -15038,23 +15778,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * // => ['0', '1']
      */
     function keys(object) {
-      var isProto = isPrototype(object);
-      if (!(isProto || isArrayLike(object))) {
-        return baseKeys(object);
-      }
-      var indexes = indexKeys(object),
-          skipIndexes = !!indexes,
-          result = indexes || [],
-          length = result.length;
-
-      for (var key in object) {
-        if (baseHas(object, key) &&
-            !(skipIndexes && (key == 'length' || isIndex(key, length))) &&
-            !(isProto && key == 'constructor')) {
-          result.push(key);
-        }
-      }
-      return result;
+      return isArrayLike(object) ? arrayLikeKeys(object) : baseKeys(object);
     }
 
     /**
@@ -15081,23 +15805,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * // => ['a', 'b', 'c'] (iteration order is not guaranteed)
      */
     function keysIn(object) {
-      var index = -1,
-          isProto = isPrototype(object),
-          props = baseKeysIn(object),
-          propsLength = props.length,
-          indexes = indexKeys(object),
-          skipIndexes = !!indexes,
-          result = indexes || [],
-          length = result.length;
-
-      while (++index < propsLength) {
-        var key = props[index];
-        if (!(skipIndexes && (key == 'length' || isIndex(key, length))) &&
-            !(key == 'constructor' && (isProto || !hasOwnProperty.call(object, key)))) {
-          result.push(key);
-        }
-      }
-      return result;
+      return isArrayLike(object) ? arrayLikeKeys(object, true) : baseKeysIn(object);
     }
 
     /**
@@ -15111,8 +15819,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @since 3.8.0
      * @category Object
      * @param {Object} object The object to iterate over.
-     * @param {Array|Function|Object|string} [iteratee=_.identity]
-     *  The function invoked per iteration.
+     * @param {Function} [iteratee=_.identity] The function invoked per iteration.
      * @returns {Object} Returns the new mapped object.
      * @see _.mapValues
      * @example
@@ -15127,7 +15834,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
       iteratee = getIteratee(iteratee, 3);
 
       baseForOwn(object, function(value, key, object) {
-        result[iteratee(value, key, object)] = value;
+        baseAssignValue(result, iteratee(value, key, object), value);
       });
       return result;
     }
@@ -15143,8 +15850,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @since 2.4.0
      * @category Object
      * @param {Object} object The object to iterate over.
-     * @param {Array|Function|Object|string} [iteratee=_.identity]
-     *  The function invoked per iteration.
+     * @param {Function} [iteratee=_.identity] The function invoked per iteration.
      * @returns {Object} Returns the new mapped object.
      * @see _.mapKeys
      * @example
@@ -15166,7 +15872,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
       iteratee = getIteratee(iteratee, 3);
 
       baseForOwn(object, function(value, key, object) {
-        result[key] = iteratee(value, key, object);
+        baseAssignValue(result, key, iteratee(value, key, object));
       });
       return result;
     }
@@ -15191,16 +15897,16 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @returns {Object} Returns `object`.
      * @example
      *
-     * var users = {
-     *   'data': [{ 'user': 'barney' }, { 'user': 'fred' }]
+     * var object = {
+     *   'a': [{ 'b': 2 }, { 'd': 4 }]
      * };
      *
-     * var ages = {
-     *   'data': [{ 'age': 36 }, { 'age': 40 }]
+     * var other = {
+     *   'a': [{ 'c': 3 }, { 'e': 5 }]
      * };
      *
-     * _.merge(users, ages);
-     * // => { 'data': [{ 'user': 'barney', 'age': 36 }, { 'user': 'fred', 'age': 40 }] }
+     * _.merge(object, other);
+     * // => { 'a': [{ 'b': 2, 'c': 3 }, { 'd': 4, 'e': 5 }] }
      */
     var merge = createAssigner(function(object, source, srcIndex) {
       baseMerge(object, source, srcIndex);
@@ -15210,7 +15916,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * This method is like `_.merge` except that it accepts `customizer` which
      * is invoked to produce the merged values of the destination and source
      * properties. If `customizer` returns `undefined`, merging is handled by the
-     * method instead. The `customizer` is invoked with seven arguments:
+     * method instead. The `customizer` is invoked with six arguments:
      * (objValue, srcValue, key, object, source, stack).
      *
      * **Note:** This method mutates `object`.
@@ -15231,18 +15937,11 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      *   }
      * }
      *
-     * var object = {
-     *   'fruits': ['apple'],
-     *   'vegetables': ['beet']
-     * };
-     *
-     * var other = {
-     *   'fruits': ['banana'],
-     *   'vegetables': ['carrot']
-     * };
+     * var object = { 'a': [1], 'b': [2] };
+     * var other = { 'a': [3], 'b': [4] };
      *
      * _.mergeWith(object, other, customizer);
-     * // => { 'fruits': ['apple', 'banana'], 'vegetables': ['beet', 'carrot'] }
+     * // => { 'a': [1, 3], 'b': [2, 4] }
      */
     var mergeWith = createAssigner(function(object, source, srcIndex, customizer) {
       baseMerge(object, source, srcIndex, customizer);
@@ -15250,15 +15949,16 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
 
     /**
      * The opposite of `_.pick`; this method creates an object composed of the
-     * own and inherited enumerable string keyed properties of `object` that are
-     * not omitted.
+     * own and inherited enumerable property paths of `object` that are not omitted.
+     *
+     * **Note:** This method is considerably slower than `_.pick`.
      *
      * @static
      * @since 0.1.0
      * @memberOf _
      * @category Object
      * @param {Object} object The source object.
-     * @param {...(string|string[])} [props] The property identifiers to omit.
+     * @param {...(string|string[])} [paths] The property paths to omit.
      * @returns {Object} Returns the new object.
      * @example
      *
@@ -15267,12 +15967,26 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * _.omit(object, ['a', 'c']);
      * // => { 'b': '2' }
      */
-    var omit = rest(function(object, props) {
+    var omit = flatRest(function(object, paths) {
+      var result = {};
       if (object == null) {
-        return {};
+        return result;
       }
-      props = arrayMap(baseFlatten(props, 1), toKey);
-      return basePick(object, baseDifference(getAllKeysIn(object), props));
+      var isDeep = false;
+      paths = arrayMap(paths, function(path) {
+        path = castPath(path, object);
+        isDeep || (isDeep = path.length > 1);
+        return path;
+      });
+      copyObject(object, getAllKeysIn(object), result);
+      if (isDeep) {
+        result = baseClone(result, CLONE_DEEP_FLAG | CLONE_FLAT_FLAG | CLONE_SYMBOLS_FLAG);
+      }
+      var length = paths.length;
+      while (length--) {
+        baseUnset(result, paths[length]);
+      }
+      return result;
     });
 
     /**
@@ -15286,8 +16000,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @since 4.0.0
      * @category Object
      * @param {Object} object The source object.
-     * @param {Array|Function|Object|string} [predicate=_.identity]
-     *  The function invoked per property.
+     * @param {Function} [predicate=_.identity] The function invoked per property.
      * @returns {Object} Returns the new object.
      * @example
      *
@@ -15297,10 +16010,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * // => { 'b': '2' }
      */
     function omitBy(object, predicate) {
-      predicate = getIteratee(predicate);
-      return basePickBy(object, function(value, key) {
-        return !predicate(value, key);
-      });
+      return pickBy(object, negate(getIteratee(predicate)));
     }
 
     /**
@@ -15311,7 +16021,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @memberOf _
      * @category Object
      * @param {Object} object The source object.
-     * @param {...(string|string[])} [props] The property identifiers to pick.
+     * @param {...(string|string[])} [paths] The property paths to pick.
      * @returns {Object} Returns the new object.
      * @example
      *
@@ -15320,8 +16030,8 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * _.pick(object, ['a', 'c']);
      * // => { 'a': 1, 'c': 3 }
      */
-    var pick = rest(function(object, props) {
-      return object == null ? {} : basePick(object, arrayMap(baseFlatten(props, 1), toKey));
+    var pick = flatRest(function(object, paths) {
+      return object == null ? {} : basePick(object, paths);
     });
 
     /**
@@ -15333,8 +16043,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @since 4.0.0
      * @category Object
      * @param {Object} object The source object.
-     * @param {Array|Function|Object|string} [predicate=_.identity]
-     *  The function invoked per property.
+     * @param {Function} [predicate=_.identity] The function invoked per property.
      * @returns {Object} Returns the new object.
      * @example
      *
@@ -15344,7 +16053,16 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * // => { 'a': 1, 'c': 3 }
      */
     function pickBy(object, predicate) {
-      return object == null ? {} : basePickBy(object, getIteratee(predicate));
+      if (object == null) {
+        return {};
+      }
+      var props = arrayMap(getAllKeysIn(object), function(prop) {
+        return [prop];
+      });
+      predicate = getIteratee(predicate);
+      return basePickBy(object, props, function(value, path) {
+        return predicate(value, path[0]);
+      });
     }
 
     /**
@@ -15377,15 +16095,15 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * // => 'default'
      */
     function result(object, path, defaultValue) {
-      path = isKey(path, object) ? [path] : castPath(path);
+      path = castPath(path, object);
 
       var index = -1,
           length = path.length;
 
       // Ensure the loop is entered when path is empty.
       if (!length) {
-        object = undefined;
         length = 1;
+        object = undefined;
       }
       while (++index < length) {
         var value = object == null ? undefined : object[toKey(path[index])];
@@ -15542,22 +16260,23 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * // => { '1': ['a', 'c'], '2': ['b'] }
      */
     function transform(object, iteratee, accumulator) {
-      var isArr = isArray(object) || isTypedArray(object);
-      iteratee = getIteratee(iteratee, 4);
+      var isArr = isArray(object),
+          isArrLike = isArr || isBuffer(object) || isTypedArray(object);
 
+      iteratee = getIteratee(iteratee, 4);
       if (accumulator == null) {
-        if (isArr || isObject(object)) {
-          var Ctor = object.constructor;
-          if (isArr) {
-            accumulator = isArray(object) ? new Ctor : [];
-          } else {
-            accumulator = isFunction(Ctor) ? baseCreate(getPrototype(object)) : {};
-          }
-        } else {
+        var Ctor = object && object.constructor;
+        if (isArrLike) {
+          accumulator = isArr ? new Ctor : [];
+        }
+        else if (isObject(object)) {
+          accumulator = isFunction(Ctor) ? baseCreate(getPrototype(object)) : {};
+        }
+        else {
           accumulator = {};
         }
       }
-      (isArr ? arrayEach : baseForOwn)(object, function(value, index, object) {
+      (isArrLike ? arrayEach : baseForOwn)(object, function(value, index, object) {
         return iteratee(accumulator, value, index, object);
       });
       return accumulator;
@@ -15681,7 +16400,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * // => ['h', 'i']
      */
     function values(object) {
-      return object ? baseValues(object, keys(object)) : [];
+      return object == null ? [] : baseValues(object, keys(object));
     }
 
     /**
@@ -15788,12 +16507,12 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * // => true
      */
     function inRange(number, start, end) {
-      start = toNumber(start) || 0;
+      start = toFinite(start);
       if (end === undefined) {
         end = start;
         start = 0;
       } else {
-        end = toNumber(end) || 0;
+        end = toFinite(end);
       }
       number = toNumber(number);
       return baseInRange(number, start, end);
@@ -15849,12 +16568,12 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
         upper = 1;
       }
       else {
-        lower = toNumber(lower) || 0;
+        lower = toFinite(lower);
         if (upper === undefined) {
           upper = lower;
           lower = 0;
         } else {
-          upper = toNumber(upper) || 0;
+          upper = toFinite(upper);
         }
       }
       if (lower > upper) {
@@ -15917,8 +16636,9 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
 
     /**
      * Deburrs `string` by converting
-     * [latin-1 supplementary letters](https://en.wikipedia.org/wiki/Latin-1_Supplement_(Unicode_block)#Character_table)
-     * to basic latin letters and removing
+     * [Latin-1 Supplement](https://en.wikipedia.org/wiki/Latin-1_Supplement_(Unicode_block)#Character_table)
+     * and [Latin Extended-A](https://en.wikipedia.org/wiki/Latin_Extended-A)
+     * letters to basic Latin letters and removing
      * [combining diacritical marks](https://en.wikipedia.org/wiki/Combining_Diacritical_Marks).
      *
      * @static
@@ -15934,7 +16654,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      */
     function deburr(string) {
       string = toString(string);
-      return string && string.replace(reLatin1, deburrLetter).replace(reComboMark, '');
+      return string && string.replace(reLatin, deburrLetter).replace(reComboMark, '');
     }
 
     /**
@@ -15944,7 +16664,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @memberOf _
      * @since 3.0.0
      * @category String
-     * @param {string} [string=''] The string to search.
+     * @param {string} [string=''] The string to inspect.
      * @param {string} [target] The string to search for.
      * @param {number} [position=string.length] The position to search up to.
      * @returns {boolean} Returns `true` if `string` ends with `target`,
@@ -15969,13 +16689,14 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
         ? length
         : baseClamp(toInteger(position), 0, length);
 
+      var end = position;
       position -= target.length;
-      return position >= 0 && string.indexOf(target, position) == position;
+      return position >= 0 && string.slice(position, end) == target;
     }
 
     /**
-     * Converts the characters "&", "<", ">", '"', "'", and "\`" in `string` to
-     * their corresponding HTML entities.
+     * Converts the characters "&", "<", ">", '"', and "'" in `string` to their
+     * corresponding HTML entities.
      *
      * **Note:** No other characters are escaped. To escape additional
      * characters use a third-party library like [_he_](https://mths.be/he).
@@ -15985,12 +16706,6 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * unless they're part of a tag or unquoted attribute value. See
      * [Mathias Bynens's article](https://mathiasbynens.be/notes/ambiguous-ampersands)
      * (under "semi-related fun fact") for more details.
-     *
-     * Backticks are escaped because in IE < 9, they can break out of
-     * attribute values or HTML comments. See [#59](https://html5sec.org/#59),
-     * [#102](https://html5sec.org/#102), [#108](https://html5sec.org/#108), and
-     * [#133](https://html5sec.org/#133) of the
-     * [HTML5 Security Cheatsheet](https://html5sec.org/) for more details.
      *
      * When working with HTML you should always
      * [quote attribute values](http://wonko.com/post/html-escaping) to reduce
@@ -16234,15 +16949,12 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * // => [6, 8, 10]
      */
     function parseInt(string, radix, guard) {
-      // Chrome fails to trim leading <BOM> whitespace characters.
-      // See https://bugs.chromium.org/p/v8/issues/detail?id=3109 for more details.
       if (guard || radix == null) {
         radix = 0;
       } else if (radix) {
         radix = +radix;
       }
-      string = toString(string).replace(reTrim, '');
-      return nativeParseInt(string, radix || (reHasHexPrefix.test(string) ? 16 : 10));
+      return nativeParseInt(toString(string).replace(reTrimStart, ''), radix || 0);
     }
 
     /**
@@ -16299,7 +17011,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
       var args = arguments,
           string = toString(args[0]);
 
-      return args.length < 3 ? string : nativeReplace.call(string, args[1], args[2]);
+      return args.length < 3 ? string : string.replace(args[1], args[2]);
     }
 
     /**
@@ -16360,11 +17072,11 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
             (separator != null && !isRegExp(separator))
           )) {
         separator = baseToString(separator);
-        if (separator == '' && reHasComplexSymbol.test(string)) {
+        if (!separator && hasUnicode(string)) {
           return castSlice(stringToArray(string), 0, limit);
         }
       }
-      return nativeSplit.call(string, separator, limit);
+      return string.split(separator, limit);
     }
 
     /**
@@ -16399,7 +17111,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @memberOf _
      * @since 3.0.0
      * @category String
-     * @param {string} [string=''] The string to search.
+     * @param {string} [string=''] The string to inspect.
      * @param {string} [target] The string to search for.
      * @param {number} [position=0] The position to search from.
      * @returns {boolean} Returns `true` if `string` starts with `target`,
@@ -16418,7 +17130,8 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
     function startsWith(string, target, position) {
       string = toString(string);
       position = baseClamp(toInteger(position), 0, string.length);
-      return string.lastIndexOf(baseToString(target), position) == position;
+      target = baseToString(target);
+      return string.slice(position, position + target.length) == target;
     }
 
     /**
@@ -16480,7 +17193,8 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * compiled({ 'user': 'barney' });
      * // => 'hello barney!'
      *
-     * // Use the ES delimiter as an alternative to the default "interpolate" delimiter.
+     * // Use the ES template literal delimiter as an "interpolate" delimiter.
+     * // Disable support by replacing the "interpolate" delimiter.
      * var compiled = _.template('hello ${ user }!');
      * compiled({ 'user': 'pebbles' });
      * // => 'hello pebbles!'
@@ -16835,7 +17549,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
       string = toString(string);
 
       var strLength = string.length;
-      if (reHasComplexSymbol.test(string)) {
+      if (hasUnicode(string)) {
         var strSymbols = stringToArray(string);
         strLength = strSymbols.length;
       }
@@ -16881,7 +17595,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
 
     /**
      * The inverse of `_.escape`; this method converts the HTML entities
-     * `&amp;`, `&lt;`, `&gt;`, `&quot;`, `&#39;`, and `&#96;` in `string` to
+     * `&amp;`, `&lt;`, `&gt;`, `&quot;`, and `&#39;` in `string` to
      * their corresponding characters.
      *
      * **Note:** No other HTML entities are unescaped. To unescape additional
@@ -16972,7 +17686,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
       pattern = guard ? undefined : pattern;
 
       if (pattern === undefined) {
-        pattern = reHasComplexWord.test(string) ? reComplexWord : reBasicWord;
+        return hasUnicodeWord(string) ? unicodeWords(string) : asciiWords(string);
       }
       return string.match(pattern) || [];
     }
@@ -17001,7 +17715,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      *   elements = [];
      * }
      */
-    var attempt = rest(function(func, args) {
+    var attempt = baseRest(function(func, args) {
       try {
         return apply(func, undefined, args);
       } catch (e) {
@@ -17026,19 +17740,19 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      *
      * var view = {
      *   'label': 'docs',
-     *   'onClick': function() {
+     *   'click': function() {
      *     console.log('clicked ' + this.label);
      *   }
      * };
      *
-     * _.bindAll(view, ['onClick']);
-     * jQuery(element).on('click', view.onClick);
+     * _.bindAll(view, ['click']);
+     * jQuery(element).on('click', view.click);
      * // => Logs 'clicked docs' when clicked.
      */
-    var bindAll = rest(function(object, methodNames) {
-      arrayEach(baseFlatten(methodNames, 1), function(key) {
+    var bindAll = flatRest(function(object, methodNames) {
+      arrayEach(methodNames, function(key) {
         key = toKey(key);
-        object[key] = bind(object[key], object);
+        baseAssignValue(object, key, bind(object[key], object));
       });
       return object;
     });
@@ -17060,7 +17774,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * var func = _.cond([
      *   [_.matches({ 'a': 1 }),           _.constant('matches A')],
      *   [_.conforms({ 'b': _.isNumber }), _.constant('matches B')],
-     *   [_.constant(true),                _.constant('no match')]
+     *   [_.stubTrue,                      _.constant('no match')]
      * ]);
      *
      * func({ 'a': 1, 'b': 2 });
@@ -17073,7 +17787,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * // => 'no match'
      */
     function cond(pairs) {
-      var length = pairs ? pairs.length : 0,
+      var length = pairs == null ? 0 : pairs.length,
           toIteratee = getIteratee();
 
       pairs = !length ? [] : arrayMap(pairs, function(pair) {
@@ -17083,7 +17797,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
         return [toIteratee(pair[0]), pair[1]];
       });
 
-      return rest(function(args) {
+      return baseRest(function(args) {
         var index = -1;
         while (++index < length) {
           var pair = pairs[index];
@@ -17099,6 +17813,9 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * the corresponding property values of a given object, returning `true` if
      * all predicates return truthy, else `false`.
      *
+     * **Note:** The created function is equivalent to `_.conformsTo` with
+     * `source` partially applied.
+     *
      * @static
      * @memberOf _
      * @since 4.0.0
@@ -17107,16 +17824,16 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @returns {Function} Returns the new spec function.
      * @example
      *
-     * var users = [
-     *   { 'user': 'barney', 'age': 36 },
-     *   { 'user': 'fred',   'age': 40 }
+     * var objects = [
+     *   { 'a': 2, 'b': 1 },
+     *   { 'a': 1, 'b': 2 }
      * ];
      *
-     * _.filter(users, _.conforms({ 'age': function(n) { return n > 38; } }));
-     * // => [{ 'user': 'fred', 'age': 40 }]
+     * _.filter(objects, _.conforms({ 'b': function(n) { return n > 1; } }));
+     * // => [{ 'a': 1, 'b': 2 }]
      */
     function conforms(source) {
-      return baseConforms(baseClone(source, true));
+      return baseConforms(baseClone(source, CLONE_DEEP_FLAG));
     }
 
     /**
@@ -17145,6 +17862,30 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
     }
 
     /**
+     * Checks `value` to determine whether a default value should be returned in
+     * its place. The `defaultValue` is returned if `value` is `NaN`, `null`,
+     * or `undefined`.
+     *
+     * @static
+     * @memberOf _
+     * @since 4.14.0
+     * @category Util
+     * @param {*} value The value to check.
+     * @param {*} defaultValue The default value.
+     * @returns {*} Returns the resolved value.
+     * @example
+     *
+     * _.defaultTo(1, 10);
+     * // => 1
+     *
+     * _.defaultTo(undefined, 10);
+     * // => 10
+     */
+    function defaultTo(value, defaultValue) {
+      return (value == null || value !== value) ? defaultValue : value;
+    }
+
+    /**
      * Creates a function that returns the result of invoking the given functions
      * with the `this` binding of the created function, where each successive
      * invocation is supplied the return value of the previous.
@@ -17153,7 +17894,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @memberOf _
      * @since 3.0.0
      * @category Util
-     * @param {...(Function|Function[])} [funcs] Functions to invoke.
+     * @param {...(Function|Function[])} [funcs] The functions to invoke.
      * @returns {Function} Returns the new composite function.
      * @see _.flowRight
      * @example
@@ -17176,7 +17917,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @since 3.0.0
      * @memberOf _
      * @category Util
-     * @param {...(Function|Function[])} [funcs] Functions to invoke.
+     * @param {...(Function|Function[])} [funcs] The functions to invoke.
      * @returns {Function} Returns the new composite function.
      * @see _.flow
      * @example
@@ -17192,7 +17933,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
     var flowRight = createFlow(true);
 
     /**
-     * This method returns the first argument given to it.
+     * This method returns the first argument it receives.
      *
      * @static
      * @since 0.1.0
@@ -17202,7 +17943,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @returns {*} Returns `value`.
      * @example
      *
-     * var object = { 'user': 'fred' };
+     * var object = { 'a': 1 };
      *
      * console.log(_.identity(object) === object);
      * // => true
@@ -17254,16 +17995,20 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * // => ['def']
      */
     function iteratee(func) {
-      return baseIteratee(typeof func == 'function' ? func : baseClone(func, true));
+      return baseIteratee(typeof func == 'function' ? func : baseClone(func, CLONE_DEEP_FLAG));
     }
 
     /**
      * Creates a function that performs a partial deep comparison between a given
      * object and `source`, returning `true` if the given object has equivalent
-     * property values, else `false`. The created function is equivalent to
-     * `_.isMatch` with a `source` partially applied.
+     * property values, else `false`.
      *
-     * **Note:** This method supports comparing the same values as `_.isEqual`.
+     * **Note:** The created function is equivalent to `_.isMatch` with `source`
+     * partially applied.
+     *
+     * Partial comparisons will match empty array and empty object `source`
+     * values against any array or object value, respectively. See `_.isEqual`
+     * for a list of supported value comparisons.
      *
      * @static
      * @memberOf _
@@ -17273,16 +18018,16 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @returns {Function} Returns the new spec function.
      * @example
      *
-     * var users = [
-     *   { 'user': 'barney', 'age': 36, 'active': true },
-     *   { 'user': 'fred',   'age': 40, 'active': false }
+     * var objects = [
+     *   { 'a': 1, 'b': 2, 'c': 3 },
+     *   { 'a': 4, 'b': 5, 'c': 6 }
      * ];
      *
-     * _.filter(users, _.matches({ 'age': 40, 'active': false }));
-     * // => [{ 'user': 'fred', 'age': 40, 'active': false }]
+     * _.filter(objects, _.matches({ 'a': 4, 'c': 6 }));
+     * // => [{ 'a': 4, 'b': 5, 'c': 6 }]
      */
     function matches(source) {
-      return baseMatches(baseClone(source, true));
+      return baseMatches(baseClone(source, CLONE_DEEP_FLAG));
     }
 
     /**
@@ -17290,7 +18035,9 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * value at `path` of a given object to `srcValue`, returning `true` if the
      * object value is equivalent, else `false`.
      *
-     * **Note:** This method supports comparing the same values as `_.isEqual`.
+     * **Note:** Partial comparisons will match empty array and empty object
+     * `srcValue` values against any array or object value, respectively. See
+     * `_.isEqual` for a list of supported value comparisons.
      *
      * @static
      * @memberOf _
@@ -17301,16 +18048,16 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @returns {Function} Returns the new spec function.
      * @example
      *
-     * var users = [
-     *   { 'user': 'barney' },
-     *   { 'user': 'fred' }
+     * var objects = [
+     *   { 'a': 1, 'b': 2, 'c': 3 },
+     *   { 'a': 4, 'b': 5, 'c': 6 }
      * ];
      *
-     * _.find(users, _.matchesProperty('user', 'fred'));
-     * // => { 'user': 'fred' }
+     * _.find(objects, _.matchesProperty('a', 4));
+     * // => { 'a': 4, 'b': 5, 'c': 6 }
      */
     function matchesProperty(path, srcValue) {
-      return baseMatchesProperty(path, baseClone(srcValue, true));
+      return baseMatchesProperty(path, baseClone(srcValue, CLONE_DEEP_FLAG));
     }
 
     /**
@@ -17337,7 +18084,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * _.map(objects, _.method(['a', 'b']));
      * // => [2, 1]
      */
-    var method = rest(function(path, args) {
+    var method = baseRest(function(path, args) {
       return function(object) {
         return baseInvoke(object, path, args);
       };
@@ -17366,7 +18113,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * _.map([['a', '2'], ['c', '0']], _.methodOf(object));
      * // => [2, 0]
      */
-    var methodOf = rest(function(object, args) {
+    var methodOf = baseRest(function(object, args) {
       return function(path) {
         return baseInvoke(object, path, args);
       };
@@ -17465,7 +18212,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
     }
 
     /**
-     * A method that returns `undefined`.
+     * This method returns `undefined`.
      *
      * @static
      * @memberOf _
@@ -17502,7 +18249,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      */
     function nthArg(n) {
       n = toInteger(n);
-      return rest(function(args) {
+      return baseRest(function(args) {
         return baseNth(args, n);
       });
     }
@@ -17515,8 +18262,8 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @memberOf _
      * @since 4.0.0
      * @category Util
-     * @param {...(Array|Array[]|Function|Function[]|Object|Object[]|string|string[])}
-     *  [iteratees=[_.identity]] The iteratees to invoke.
+     * @param {...(Function|Function[])} [iteratees=[_.identity]]
+     *  The iteratees to invoke.
      * @returns {Function} Returns the new function.
      * @example
      *
@@ -17535,8 +18282,8 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @memberOf _
      * @since 4.0.0
      * @category Util
-     * @param {...(Array|Array[]|Function|Function[]|Object|Object[]|string|string[])}
-     *  [predicates=[_.identity]] The predicates to check.
+     * @param {...(Function|Function[])} [predicates=[_.identity]]
+     *  The predicates to check.
      * @returns {Function} Returns the new function.
      * @example
      *
@@ -17561,8 +18308,8 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @memberOf _
      * @since 4.0.0
      * @category Util
-     * @param {...(Array|Array[]|Function|Function[]|Object|Object[]|string|string[])}
-     *  [predicates=[_.identity]] The predicates to check.
+     * @param {...(Function|Function[])} [predicates=[_.identity]]
+     *  The predicates to check.
      * @returns {Function} Returns the new function.
      * @example
      *
@@ -17714,7 +18461,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
     var rangeRight = createRange(true);
 
     /**
-     * A method that returns a new empty array.
+     * This method returns a new empty array.
      *
      * @static
      * @memberOf _
@@ -17736,7 +18483,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
     }
 
     /**
-     * A method that returns `false`.
+     * This method returns `false`.
      *
      * @static
      * @memberOf _
@@ -17753,7 +18500,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
     }
 
     /**
-     * A method that returns a new empty object.
+     * This method returns a new empty object.
      *
      * @static
      * @memberOf _
@@ -17775,7 +18522,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
     }
 
     /**
-     * A method that returns an empty string.
+     * This method returns an empty string.
      *
      * @static
      * @memberOf _
@@ -17792,7 +18539,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
     }
 
     /**
-     * A method that returns `true`.
+     * This method returns `true`.
      *
      * @static
      * @memberOf _
@@ -17866,7 +18613,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
       if (isArray(value)) {
         return arrayMap(value, toKey);
       }
-      return isSymbol(value) ? [value] : copyArray(stringToPath(value));
+      return isSymbol(value) ? [value] : copyArray(stringToPath(toString(value)));
     }
 
     /**
@@ -17910,7 +18657,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      */
     var add = createMathOperation(function(augend, addend) {
       return augend + addend;
-    });
+    }, 0);
 
     /**
      * Computes `number` rounded up to `precision`.
@@ -17952,7 +18699,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      */
     var divide = createMathOperation(function(dividend, divisor) {
       return dividend / divisor;
-    });
+    }, 1);
 
     /**
      * Computes `number` rounded down to `precision`.
@@ -18011,8 +18758,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @since 4.0.0
      * @category Math
      * @param {Array} array The array to iterate over.
-     * @param {Array|Function|Object|string} [iteratee=_.identity]
-     *  The iteratee invoked per element.
+     * @param {Function} [iteratee=_.identity] The iteratee invoked per element.
      * @returns {*} Returns the maximum value.
      * @example
      *
@@ -18027,7 +18773,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      */
     function maxBy(array, iteratee) {
       return (array && array.length)
-        ? baseExtremum(array, getIteratee(iteratee), baseGt)
+        ? baseExtremum(array, getIteratee(iteratee, 2), baseGt)
         : undefined;
     }
 
@@ -18059,8 +18805,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @since 4.7.0
      * @category Math
      * @param {Array} array The array to iterate over.
-     * @param {Array|Function|Object|string} [iteratee=_.identity]
-     *  The iteratee invoked per element.
+     * @param {Function} [iteratee=_.identity] The iteratee invoked per element.
      * @returns {number} Returns the mean.
      * @example
      *
@@ -18074,7 +18819,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * // => 5
      */
     function meanBy(array, iteratee) {
-      return baseMean(array, getIteratee(iteratee));
+      return baseMean(array, getIteratee(iteratee, 2));
     }
 
     /**
@@ -18111,8 +18856,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @since 4.0.0
      * @category Math
      * @param {Array} array The array to iterate over.
-     * @param {Array|Function|Object|string} [iteratee=_.identity]
-     *  The iteratee invoked per element.
+     * @param {Function} [iteratee=_.identity] The iteratee invoked per element.
      * @returns {*} Returns the minimum value.
      * @example
      *
@@ -18127,7 +18871,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      */
     function minBy(array, iteratee) {
       return (array && array.length)
-        ? baseExtremum(array, getIteratee(iteratee), baseLt)
+        ? baseExtremum(array, getIteratee(iteratee, 2), baseLt)
         : undefined;
     }
 
@@ -18148,7 +18892,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      */
     var multiply = createMathOperation(function(multiplier, multiplicand) {
       return multiplier * multiplicand;
-    });
+    }, 1);
 
     /**
      * Computes `number` rounded to `precision`.
@@ -18190,7 +18934,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      */
     var subtract = createMathOperation(function(minuend, subtrahend) {
       return minuend - subtrahend;
-    });
+    }, 0);
 
     /**
      * Computes the sum of the values in `array`.
@@ -18222,8 +18966,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      * @since 4.0.0
      * @category Math
      * @param {Array} array The array to iterate over.
-     * @param {Array|Function|Object|string} [iteratee=_.identity]
-     *  The iteratee invoked per element.
+     * @param {Function} [iteratee=_.identity] The iteratee invoked per element.
      * @returns {number} Returns the sum.
      * @example
      *
@@ -18238,7 +18981,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
      */
     function sumBy(array, iteratee) {
       return (array && array.length)
-        ? baseSum(array, getIteratee(iteratee))
+        ? baseSum(array, getIteratee(iteratee, 2))
         : 0;
     }
 
@@ -18417,7 +19160,9 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
     lodash.cloneDeep = cloneDeep;
     lodash.cloneDeepWith = cloneDeepWith;
     lodash.cloneWith = cloneWith;
+    lodash.conformsTo = conformsTo;
     lodash.deburr = deburr;
+    lodash.defaultTo = defaultTo;
     lodash.divide = divide;
     lodash.endsWith = endsWith;
     lodash.eq = eq;
@@ -18658,7 +19403,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
       return this.reverse().find(predicate);
     };
 
-    LazyWrapper.prototype.invokeMap = rest(function(path, args) {
+    LazyWrapper.prototype.invokeMap = baseRest(function(path, args) {
       if (typeof path == 'function') {
         return new LazyWrapper(this);
       }
@@ -18668,10 +19413,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
     });
 
     LazyWrapper.prototype.reject = function(predicate) {
-      predicate = getIteratee(predicate, 3);
-      return this.filter(function(value) {
-        return !predicate(value);
-      });
+      return this.filter(negate(getIteratee(predicate)));
     };
 
     LazyWrapper.prototype.slice = function(start, end) {
@@ -18775,7 +19517,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
       }
     });
 
-    realNames[createHybridWrapper(undefined, BIND_KEY_FLAG).name] = [{
+    realNames[createHybrid(undefined, WRAP_BIND_KEY_FLAG).name] = [{
       'name': 'wrapper',
       'func': undefined
     }];
@@ -18794,33 +19536,35 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
     lodash.prototype.reverse = wrapperReverse;
     lodash.prototype.toJSON = lodash.prototype.valueOf = lodash.prototype.value = wrapperValue;
 
-    if (iteratorSymbol) {
-      lodash.prototype[iteratorSymbol] = wrapperToIterator;
+    // Add lazy aliases.
+    lodash.prototype.first = lodash.prototype.head;
+
+    if (symIterator) {
+      lodash.prototype[symIterator] = wrapperToIterator;
     }
     return lodash;
-  }
+  });
 
   /*--------------------------------------------------------------------------*/
 
   // Export lodash.
   var _ = runInContext();
 
-  // Expose Lodash on the free variable `window` or `self` when available so it's
-  // globally accessible, even when bundled with Browserify, Webpack, etc. This
-  // also prevents errors in cases where Lodash is loaded by a script tag in the
-  // presence of an AMD loader. See http://requirejs.org/docs/errors.html#mismatch
-  // for more details. Use `_.noConflict` to remove Lodash from the global object.
-  (freeSelf || {})._ = _;
-
-  // Some AMD build optimizers like r.js check for condition patterns like the following:
+  // Some AMD build optimizers, like r.js, check for condition patterns like:
   if (typeof define == 'function' && typeof define.amd == 'object' && define.amd) {
+    // Expose Lodash on the global object to prevent errors when Lodash is
+    // loaded by a script tag in the presence of an AMD loader.
+    // See http://requirejs.org/docs/errors.html#mismatch for more details.
+    // Use `_.noConflict` to remove Lodash from the global object.
+    root._ = _;
+
     // Define as an anonymous module so, through path mapping, it can be
     // referenced as the "underscore" module.
     define(function() {
       return _;
     });
   }
-  // Check for `exports` after `define` in case a build optimizer adds an `exports` object.
+  // Check for `exports` after `define` in case a build optimizer adds it.
   else if (freeModule) {
     // Export for Node.js.
     (freeModule.exports = _)._ = _;
@@ -20055,7 +20799,7 @@ module.exports = request;
 },{"emitter":6,"reduce":24}],26:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -20123,10 +20867,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287}],27:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330}],27:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -20546,10 +21290,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287,"../model/CreateEndpointBasicAuthRepresentation":87,"../model/EndpointBasicAuthRepresentation":90,"../model/EndpointConfigurationRepresentation":91}],28:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330,"../model/CreateEndpointBasicAuthRepresentation":87,"../model/EndpointBasicAuthRepresentation":90,"../model/EndpointConfigurationRepresentation":91}],28:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -21210,10 +21954,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287,"../model/AbstractGroupRepresentation":70,"../model/AddGroupCapabilitiesRepresentation":73,"../model/GroupRepresentation":106,"../model/LightGroupRepresentation":110,"../model/ResultListDataRepresentation":132}],29:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330,"../model/AbstractGroupRepresentation":70,"../model/AddGroupCapabilitiesRepresentation":73,"../model/GroupRepresentation":106,"../model/LightGroupRepresentation":110,"../model/ResultListDataRepresentation":132}],29:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -21537,10 +22281,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287,"../model/CreateTenantRepresentation":89,"../model/ImageUploadRepresentation":107,"../model/LightTenantRepresentation":111,"../model/TenantEvent":142,"../model/TenantRepresentation":143}],30:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330,"../model/CreateTenantRepresentation":89,"../model/ImageUploadRepresentation":107,"../model/LightTenantRepresentation":111,"../model/TenantEvent":142,"../model/TenantRepresentation":143}],30:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -21777,10 +22521,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287,"../model/AbstractUserRepresentation":72,"../model/BulkUserUpdateRepresentation":81,"../model/ResultListDataRepresentation":132,"../model/UserRepresentation":148}],31:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330,"../model/AbstractUserRepresentation":72,"../model/BulkUserUpdateRepresentation":81,"../model/ResultListDataRepresentation":132,"../model/UserRepresentation":148}],31:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -22157,10 +22901,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287,"../model/ResultListDataRepresentation":132}],32:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330,"../model/ResultListDataRepresentation":132}],32:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -22418,10 +23162,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287,"../model/AppDefinitionPublishRepresentation":75,"../model/AppDefinitionRepresentation":76,"../model/AppDefinitionUpdateResultRepresentation":77,"../model/ResultListDataRepresentation":132,"../model/RuntimeAppDefinitionSaveRepresentation":133}],33:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330,"../model/AppDefinitionPublishRepresentation":75,"../model/AppDefinitionRepresentation":76,"../model/AppDefinitionUpdateResultRepresentation":77,"../model/ResultListDataRepresentation":132,"../model/RuntimeAppDefinitionSaveRepresentation":133}],33:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -22616,10 +23360,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287,"../model/AppDefinitionPublishRepresentation":75,"../model/AppDefinitionRepresentation":76,"../model/AppDefinitionUpdateResultRepresentation":77}],34:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330,"../model/AppDefinitionPublishRepresentation":75,"../model/AppDefinitionRepresentation":76,"../model/AppDefinitionUpdateResultRepresentation":77}],34:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -22720,10 +23464,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287,"../model/ResultListDataRepresentation":132,"../model/RuntimeAppDefinitionSaveRepresentation":133}],35:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330,"../model/ResultListDataRepresentation":132,"../model/RuntimeAppDefinitionSaveRepresentation":133}],35:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -22925,10 +23669,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287,"../model/CommentRepresentation":84,"../model/ResultListDataRepresentation":132}],36:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330,"../model/CommentRepresentation":84,"../model/ResultListDataRepresentation":132}],36:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -23412,10 +24156,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287,"../model/RelatedContentRepresentation":129,"../model/ResultListDataRepresentation":132}],37:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330,"../model/RelatedContentRepresentation":129,"../model/ResultListDataRepresentation":132}],37:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -23496,10 +24240,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287}],38:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330}],38:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -23721,10 +24465,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287,"../model/FormRepresentation":100,"../model/FormSaveRepresentation":101,"../model/ValidationErrorRepresentation":150}],39:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330,"../model/FormRepresentation":100,"../model/FormSaveRepresentation":101,"../model/ValidationErrorRepresentation":150}],39:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -23837,10 +24581,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287,"../model/ResultListDataRepresentation":132}],40:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330,"../model/ResultListDataRepresentation":132}],40:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -23949,10 +24693,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287,"../model/SyncLogEntryRepresentation":135}],41:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330,"../model/SyncLogEntryRepresentation":135}],41:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -24020,10 +24764,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287,"../model/ResultListDataRepresentation":132}],42:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330,"../model/ResultListDataRepresentation":132}],42:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -24241,10 +24985,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287,"../model/ResultListDataRepresentation":132}],43:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330,"../model/ResultListDataRepresentation":132}],43:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -24435,10 +25179,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287,"../model/ResultListDataRepresentation":132}],44:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330,"../model/ResultListDataRepresentation":132}],44:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -25118,10 +25862,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287,"../model/BoxUserAccountCredentialsRepresentation":80,"../model/ResultListDataRepresentation":132,"../model/UserAccountCredentialsRepresentation":144}],45:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330,"../model/BoxUserAccountCredentialsRepresentation":80,"../model/ResultListDataRepresentation":132,"../model/UserAccountCredentialsRepresentation":144}],45:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -25403,10 +26147,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287,"../model/BoxUserAccountCredentialsRepresentation":80,"../model/ResultListDataRepresentation":132,"../model/UserAccountCredentialsRepresentation":144}],46:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330,"../model/BoxUserAccountCredentialsRepresentation":80,"../model/ResultListDataRepresentation":132,"../model/UserAccountCredentialsRepresentation":144}],46:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -25516,10 +26260,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287,"../model/ResultListDataRepresentation":132}],47:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330,"../model/ResultListDataRepresentation":132}],47:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -25634,10 +26378,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287}],48:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330}],48:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
     if (typeof define === 'function' && define.amd) {
@@ -25752,10 +26496,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
     return exports;
 });
 
-},{"../../../alfrescoApiClient":287,"../model/ObjectNode":118}],49:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330,"../model/ObjectNode":118}],49:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -26272,10 +27016,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287,"../model/ModelRepresentation":117,"../model/ObjectNode":118,"../model/ResultListDataRepresentation":132,"../model/ValidationErrorRepresentation":150}],50:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330,"../model/ModelRepresentation":117,"../model/ObjectNode":118,"../model/ResultListDataRepresentation":132,"../model/ValidationErrorRepresentation":150}],50:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -26395,10 +27139,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287,"../model/ModelRepresentation":117,"../model/ResultListDataRepresentation":132}],51:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330,"../model/ModelRepresentation":117,"../model/ResultListDataRepresentation":132}],51:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -26804,10 +27548,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287,"../model/CreateProcessInstanceRepresentation":88,"../model/FormDefinitionRepresentation":96,"../model/FormValueRepresentation":104,"../model/ProcessFilterRequestRepresentation":120,"../model/ProcessInstanceFilterRequestRepresentation":122,"../model/ProcessInstanceRepresentation":123,"../model/ResultListDataRepresentation":132}],52:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330,"../model/CreateProcessInstanceRepresentation":88,"../model/FormDefinitionRepresentation":96,"../model/FormValueRepresentation":104,"../model/ProcessFilterRequestRepresentation":120,"../model/ProcessInstanceFilterRequestRepresentation":122,"../model/ProcessInstanceRepresentation":123,"../model/ResultListDataRepresentation":132}],52:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -26881,10 +27625,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287,"../model/ResultListDataRepresentation":132}],53:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330,"../model/ResultListDataRepresentation":132}],53:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -27018,10 +27762,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287,"../model/FormDefinitionRepresentation":96,"../model/FormValueRepresentation":104}],54:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330,"../model/FormDefinitionRepresentation":96,"../model/FormValueRepresentation":104}],54:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -27243,10 +27987,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287,"../model/CommentRepresentation":84,"../model/FormDefinitionRepresentation":96,"../model/ProcessInstanceRepresentation":123,"../model/ResultListDataRepresentation":132}],55:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330,"../model/CommentRepresentation":84,"../model/FormDefinitionRepresentation":96,"../model/ProcessInstanceRepresentation":123,"../model/ResultListDataRepresentation":132}],55:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -27352,10 +28096,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287,"../model/CreateProcessInstanceRepresentation":88,"../model/ProcessInstanceRepresentation":123,"../model/ResultListDataRepresentation":132}],56:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330,"../model/CreateProcessInstanceRepresentation":88,"../model/ProcessInstanceRepresentation":123,"../model/ResultListDataRepresentation":132}],56:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -27459,10 +28203,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287,"../model/ObjectNode":118,"../model/ProcessInstanceFilterRequestRepresentation":122,"../model/ResultListDataRepresentation":132}],57:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330,"../model/ObjectNode":118,"../model/ProcessInstanceFilterRequestRepresentation":122,"../model/ResultListDataRepresentation":132}],57:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -27534,10 +28278,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287,"../model/ProcessScopeRepresentation":126,"../model/ProcessScopesRequestRepresentation":127}],58:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330,"../model/ProcessScopeRepresentation":126,"../model/ProcessScopesRequestRepresentation":127}],58:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -27738,10 +28482,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287,"../model/ChangePasswordRepresentation":82,"../model/File":95,"../model/ImageUploadRepresentation":107,"../model/UserRepresentation":148}],59:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330,"../model/ChangePasswordRepresentation":82,"../model/File":95,"../model/ImageUploadRepresentation":107,"../model/UserRepresentation":148}],59:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -27833,10 +28577,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287}],60:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330}],60:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -27903,10 +28647,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287,"../model/SystemPropertiesRepresentation":136}],61:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330,"../model/SystemPropertiesRepresentation":136}],61:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -28245,10 +28989,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287,"../model/ObjectNode":118,"../model/TaskRepresentation":140}],62:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330,"../model/ObjectNode":118,"../model/TaskRepresentation":140}],62:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -29315,10 +30059,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287,"../model/ChecklistOrderRepresentation":83,"../model/CommentRepresentation":84,"../model/CompleteFormRepresentation":85,"../model/FormDefinitionRepresentation":96,"../model/FormValueRepresentation":104,"../model/ObjectNode":118,"../model/RelatedContentRepresentation":129,"../model/ResultListDataRepresentation":132,"../model/SaveFormRepresentation":134,"../model/TaskFilterRequestRepresentation":138,"../model/TaskRepresentation":140,"../model/TaskUpdateRepresentation":141}],63:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330,"../model/ChecklistOrderRepresentation":83,"../model/CommentRepresentation":84,"../model/CompleteFormRepresentation":85,"../model/FormDefinitionRepresentation":96,"../model/FormValueRepresentation":104,"../model/ObjectNode":118,"../model/RelatedContentRepresentation":129,"../model/ResultListDataRepresentation":132,"../model/SaveFormRepresentation":134,"../model/TaskFilterRequestRepresentation":138,"../model/TaskRepresentation":140,"../model/TaskUpdateRepresentation":141}],63:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -29472,10 +30216,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287,"../model/ChecklistOrderRepresentation":83,"../model/ResultListDataRepresentation":132,"../model/TaskRepresentation":140}],64:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330,"../model/ChecklistOrderRepresentation":83,"../model/ResultListDataRepresentation":132,"../model/TaskRepresentation":140}],64:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -29754,10 +30498,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287,"../model/CompleteFormRepresentation":85,"../model/FormDefinitionRepresentation":96,"../model/FormValueRepresentation":104,"../model/ProcessInstanceVariableRepresentation":124,"../model/SaveFormRepresentation":134}],65:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330,"../model/CompleteFormRepresentation":85,"../model/FormDefinitionRepresentation":96,"../model/FormValueRepresentation":104,"../model/ProcessInstanceVariableRepresentation":124,"../model/SaveFormRepresentation":134}],65:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -29931,10 +30675,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287,"../model/ArrayNode":79}],66:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330,"../model/ArrayNode":79}],66:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -30201,10 +30945,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287,"../model/ResetPasswordRepresentation":130,"../model/ResultListDataRepresentation":132,"../model/UserActionRepresentation":145,"../model/UserRepresentation":148}],67:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330,"../model/ResetPasswordRepresentation":130,"../model/ResultListDataRepresentation":132,"../model/UserActionRepresentation":145,"../model/UserRepresentation":148}],67:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -30658,10 +31402,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287,"../model/ResultListDataRepresentation":132,"../model/UserFilterOrderRepresentation":146,"../model/UserProcessInstanceFilterRepresentation":147,"../model/UserTaskFilterRepresentation":149}],68:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330,"../model/ResultListDataRepresentation":132,"../model/UserFilterOrderRepresentation":146,"../model/UserProcessInstanceFilterRepresentation":147,"../model/UserTaskFilterRepresentation":149}],68:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -30748,10 +31492,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287,"../model/ResultListDataRepresentation":132}],69:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330,"../model/ResultListDataRepresentation":132}],69:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (factory) {
   if (typeof define === 'function' && define.amd) {
@@ -31435,10 +32179,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../alfrescoApiClient":287,"./api/AboutApi":26,"./api/AdminEndpointsApi":27,"./api/AdminGroupsApi":28,"./api/AdminTenantsApi":29,"./api/AdminUsersApi":30,"./api/AlfrescoApi":31,"./api/AppsApi":32,"./api/AppsDefinitionApi":33,"./api/AppsRuntimeApi":34,"./api/CommentsApi":35,"./api/ContentApi":36,"./api/ContentRenditionApi":37,"./api/EditorApi":38,"./api/GroupsApi":39,"./api/IDMSyncApi":40,"./api/IntegrationAccountApi":41,"./api/IntegrationAlfrescoCloudApi":42,"./api/IntegrationAlfrescoOnPremiseApi":43,"./api/IntegrationApi":44,"./api/IntegrationBoxApi":45,"./api/IntegrationDriveApi":46,"./api/ModelBpmnApi":47,"./api/ModelJsonBpmnApi":48,"./api/ModelsApi":49,"./api/ModelsHistoryApi":50,"./api/ProcessApi":51,"./api/ProcessDefinitionsApi":52,"./api/ProcessDefinitionsFormApi":53,"./api/ProcessInstancesApi":54,"./api/ProcessInstancesInformationApi":55,"./api/ProcessInstancesListingApi":56,"./api/ProcessScopeApi":57,"./api/ProfileApi":58,"./api/ScriptFileApi":59,"./api/SystemPropertiesApi":60,"./api/TaskActionsApi":61,"./api/TaskApi":62,"./api/TaskCheckListApi":63,"./api/TaskFormsApi":64,"./api/TemporaryApi":65,"./api/UserApi":66,"./api/UserFiltersApi":67,"./api/UsersWorkflowApi":68,"./model/AbstractGroupRepresentation":70,"./model/AbstractRepresentation":71,"./model/AbstractUserRepresentation":72,"./model/AddGroupCapabilitiesRepresentation":73,"./model/AppDefinition":74,"./model/AppDefinitionPublishRepresentation":75,"./model/AppDefinitionRepresentation":76,"./model/AppDefinitionUpdateResultRepresentation":77,"./model/AppModelDefinition":78,"./model/ArrayNode":79,"./model/BoxUserAccountCredentialsRepresentation":80,"./model/BulkUserUpdateRepresentation":81,"./model/ChangePasswordRepresentation":82,"./model/ChecklistOrderRepresentation":83,"./model/CommentRepresentation":84,"./model/CompleteFormRepresentation":85,"./model/ConditionRepresentation":86,"./model/CreateEndpointBasicAuthRepresentation":87,"./model/CreateProcessInstanceRepresentation":88,"./model/CreateTenantRepresentation":89,"./model/EndpointBasicAuthRepresentation":90,"./model/EndpointConfigurationRepresentation":91,"./model/EndpointRequestHeaderRepresentation":92,"./model/EntityAttributeScopeRepresentation":93,"./model/EntityVariableScopeRepresentation":94,"./model/File":95,"./model/FormDefinitionRepresentation":96,"./model/FormFieldRepresentation":97,"./model/FormJavascriptEventRepresentation":98,"./model/FormOutcomeRepresentation":99,"./model/FormRepresentation":100,"./model/FormSaveRepresentation":101,"./model/FormScopeRepresentation":102,"./model/FormTabRepresentation":103,"./model/FormValueRepresentation":104,"./model/GroupCapabilityRepresentation":105,"./model/GroupRepresentation":106,"./model/ImageUploadRepresentation":107,"./model/LayoutRepresentation":108,"./model/LightAppRepresentation":109,"./model/LightGroupRepresentation":110,"./model/LightTenantRepresentation":111,"./model/LightUserRepresentation":112,"./model/MaplongListstring":113,"./model/MapstringListEntityVariableScopeRepresentation":114,"./model/MapstringListVariableScopeRepresentation":115,"./model/Mapstringstring":116,"./model/ModelRepresentation":117,"./model/ObjectNode":118,"./model/OptionRepresentation":119,"./model/ProcessFilterRequestRepresentation":120,"./model/ProcessInstanceFilterRepresentation":121,"./model/ProcessInstanceFilterRequestRepresentation":122,"./model/ProcessInstanceRepresentation":123,"./model/ProcessInstanceVariableRepresentation":124,"./model/ProcessScopeIdentifierRepresentation":125,"./model/ProcessScopeRepresentation":126,"./model/ProcessScopesRequestRepresentation":127,"./model/PublishIdentityInfoRepresentation":128,"./model/RelatedContentRepresentation":129,"./model/ResetPasswordRepresentation":130,"./model/RestVariable":131,"./model/ResultListDataRepresentation":132,"./model/RuntimeAppDefinitionSaveRepresentation":133,"./model/SaveFormRepresentation":134,"./model/SyncLogEntryRepresentation":135,"./model/SystemPropertiesRepresentation":136,"./model/TaskFilterRepresentation":137,"./model/TaskFilterRequestRepresentation":138,"./model/TaskQueryRequestRepresentation":139,"./model/TaskRepresentation":140,"./model/TaskUpdateRepresentation":141,"./model/TenantEvent":142,"./model/TenantRepresentation":143,"./model/UserAccountCredentialsRepresentation":144,"./model/UserActionRepresentation":145,"./model/UserFilterOrderRepresentation":146,"./model/UserProcessInstanceFilterRepresentation":147,"./model/UserRepresentation":148,"./model/UserTaskFilterRepresentation":149,"./model/ValidationErrorRepresentation":150,"./model/VariableScopeRepresentation":151}],70:[function(require,module,exports){
+},{"../../alfrescoApiClient":330,"./api/AboutApi":26,"./api/AdminEndpointsApi":27,"./api/AdminGroupsApi":28,"./api/AdminTenantsApi":29,"./api/AdminUsersApi":30,"./api/AlfrescoApi":31,"./api/AppsApi":32,"./api/AppsDefinitionApi":33,"./api/AppsRuntimeApi":34,"./api/CommentsApi":35,"./api/ContentApi":36,"./api/ContentRenditionApi":37,"./api/EditorApi":38,"./api/GroupsApi":39,"./api/IDMSyncApi":40,"./api/IntegrationAccountApi":41,"./api/IntegrationAlfrescoCloudApi":42,"./api/IntegrationAlfrescoOnPremiseApi":43,"./api/IntegrationApi":44,"./api/IntegrationBoxApi":45,"./api/IntegrationDriveApi":46,"./api/ModelBpmnApi":47,"./api/ModelJsonBpmnApi":48,"./api/ModelsApi":49,"./api/ModelsHistoryApi":50,"./api/ProcessApi":51,"./api/ProcessDefinitionsApi":52,"./api/ProcessDefinitionsFormApi":53,"./api/ProcessInstancesApi":54,"./api/ProcessInstancesInformationApi":55,"./api/ProcessInstancesListingApi":56,"./api/ProcessScopeApi":57,"./api/ProfileApi":58,"./api/ScriptFileApi":59,"./api/SystemPropertiesApi":60,"./api/TaskActionsApi":61,"./api/TaskApi":62,"./api/TaskCheckListApi":63,"./api/TaskFormsApi":64,"./api/TemporaryApi":65,"./api/UserApi":66,"./api/UserFiltersApi":67,"./api/UsersWorkflowApi":68,"./model/AbstractGroupRepresentation":70,"./model/AbstractRepresentation":71,"./model/AbstractUserRepresentation":72,"./model/AddGroupCapabilitiesRepresentation":73,"./model/AppDefinition":74,"./model/AppDefinitionPublishRepresentation":75,"./model/AppDefinitionRepresentation":76,"./model/AppDefinitionUpdateResultRepresentation":77,"./model/AppModelDefinition":78,"./model/ArrayNode":79,"./model/BoxUserAccountCredentialsRepresentation":80,"./model/BulkUserUpdateRepresentation":81,"./model/ChangePasswordRepresentation":82,"./model/ChecklistOrderRepresentation":83,"./model/CommentRepresentation":84,"./model/CompleteFormRepresentation":85,"./model/ConditionRepresentation":86,"./model/CreateEndpointBasicAuthRepresentation":87,"./model/CreateProcessInstanceRepresentation":88,"./model/CreateTenantRepresentation":89,"./model/EndpointBasicAuthRepresentation":90,"./model/EndpointConfigurationRepresentation":91,"./model/EndpointRequestHeaderRepresentation":92,"./model/EntityAttributeScopeRepresentation":93,"./model/EntityVariableScopeRepresentation":94,"./model/File":95,"./model/FormDefinitionRepresentation":96,"./model/FormFieldRepresentation":97,"./model/FormJavascriptEventRepresentation":98,"./model/FormOutcomeRepresentation":99,"./model/FormRepresentation":100,"./model/FormSaveRepresentation":101,"./model/FormScopeRepresentation":102,"./model/FormTabRepresentation":103,"./model/FormValueRepresentation":104,"./model/GroupCapabilityRepresentation":105,"./model/GroupRepresentation":106,"./model/ImageUploadRepresentation":107,"./model/LayoutRepresentation":108,"./model/LightAppRepresentation":109,"./model/LightGroupRepresentation":110,"./model/LightTenantRepresentation":111,"./model/LightUserRepresentation":112,"./model/MaplongListstring":113,"./model/MapstringListEntityVariableScopeRepresentation":114,"./model/MapstringListVariableScopeRepresentation":115,"./model/Mapstringstring":116,"./model/ModelRepresentation":117,"./model/ObjectNode":118,"./model/OptionRepresentation":119,"./model/ProcessFilterRequestRepresentation":120,"./model/ProcessInstanceFilterRepresentation":121,"./model/ProcessInstanceFilterRequestRepresentation":122,"./model/ProcessInstanceRepresentation":123,"./model/ProcessInstanceVariableRepresentation":124,"./model/ProcessScopeIdentifierRepresentation":125,"./model/ProcessScopeRepresentation":126,"./model/ProcessScopesRequestRepresentation":127,"./model/PublishIdentityInfoRepresentation":128,"./model/RelatedContentRepresentation":129,"./model/ResetPasswordRepresentation":130,"./model/RestVariable":131,"./model/ResultListDataRepresentation":132,"./model/RuntimeAppDefinitionSaveRepresentation":133,"./model/SaveFormRepresentation":134,"./model/SyncLogEntryRepresentation":135,"./model/SystemPropertiesRepresentation":136,"./model/TaskFilterRepresentation":137,"./model/TaskFilterRequestRepresentation":138,"./model/TaskQueryRequestRepresentation":139,"./model/TaskRepresentation":140,"./model/TaskUpdateRepresentation":141,"./model/TenantEvent":142,"./model/TenantRepresentation":143,"./model/UserAccountCredentialsRepresentation":144,"./model/UserActionRepresentation":145,"./model/UserFilterOrderRepresentation":146,"./model/UserProcessInstanceFilterRepresentation":147,"./model/UserRepresentation":148,"./model/UserTaskFilterRepresentation":149,"./model/ValidationErrorRepresentation":150,"./model/VariableScopeRepresentation":151}],70:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -31520,10 +32264,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287}],71:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330}],71:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -31575,10 +32319,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287}],72:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330}],72:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -31674,10 +32418,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287}],73:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330}],73:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -31738,10 +32482,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287}],74:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330}],74:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -31823,10 +32567,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287,"./AppModelDefinition":78,"./PublishIdentityInfoRepresentation":128}],75:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330,"./AppModelDefinition":78,"./PublishIdentityInfoRepresentation":128}],75:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -31894,10 +32638,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287}],76:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330}],76:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -32014,10 +32758,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287}],77:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330}],77:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -32120,10 +32864,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287,"./AppDefinitionRepresentation":76}],78:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330,"./AppDefinitionRepresentation":76}],78:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -32254,10 +32998,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287}],79:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330}],79:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -32510,10 +33254,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287}],80:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330}],80:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -32588,10 +33332,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287}],81:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330}],81:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -32687,10 +33431,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287}],82:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330}],82:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -32758,10 +33502,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287}],83:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330}],83:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -32822,10 +33566,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287}],84:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330}],84:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -32907,10 +33651,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287,"./LightUserRepresentation":112}],85:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330,"./LightUserRepresentation":112}],85:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -32978,10 +33722,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287}],86:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330}],86:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -33091,10 +33835,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287}],87:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330}],87:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -33176,10 +33920,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287}],88:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330}],88:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -33261,10 +34005,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287}],89:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330}],89:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -33346,10 +34090,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287}],90:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330}],90:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -33445,10 +34189,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287}],91:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330}],91:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -33572,10 +34316,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287,"./EndpointRequestHeaderRepresentation":92}],92:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330,"./EndpointRequestHeaderRepresentation":92}],92:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -33643,10 +34387,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287}],93:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330}],93:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -33714,10 +34458,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287}],94:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330}],94:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -33799,10 +34543,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287,"./EntityAttributeScopeRepresentation":93}],95:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330,"./EntityAttributeScopeRepresentation":93}],95:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -33961,10 +34705,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287}],96:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330}],96:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -34151,10 +34895,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287,"./FormFieldRepresentation":97,"./FormJavascriptEventRepresentation":98,"./FormOutcomeRepresentation":99,"./FormTabRepresentation":103}],97:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330,"./FormFieldRepresentation":97,"./FormJavascriptEventRepresentation":98,"./FormOutcomeRepresentation":99,"./FormTabRepresentation":103}],97:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -34418,10 +35162,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287,"./ConditionRepresentation":86,"./LayoutRepresentation":108,"./OptionRepresentation":119}],98:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330,"./ConditionRepresentation":86,"./LayoutRepresentation":108,"./OptionRepresentation":119}],98:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -34489,10 +35233,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287}],99:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330}],99:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -34560,10 +35304,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287}],100:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330}],100:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -34687,10 +35431,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287,"./FormDefinitionRepresentation":96}],101:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330,"./FormDefinitionRepresentation":96}],101:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -34786,10 +35530,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287,"./FormRepresentation":100,"./ProcessScopeIdentifierRepresentation":125}],102:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330,"./FormRepresentation":100,"./ProcessScopeIdentifierRepresentation":125}],102:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -34885,10 +35629,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287,"./FormFieldRepresentation":97,"./FormOutcomeRepresentation":99}],103:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330,"./FormFieldRepresentation":97,"./FormOutcomeRepresentation":99}],103:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -34963,10 +35707,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287,"./ConditionRepresentation":86}],104:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330,"./ConditionRepresentation":86}],104:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -35034,10 +35778,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287}],105:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330}],105:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -35105,10 +35849,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287}],106:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330}],106:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -35246,10 +35990,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287,"./GroupCapabilityRepresentation":105,"./GroupRepresentation":106,"./UserRepresentation":148}],107:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330,"./GroupCapabilityRepresentation":105,"./GroupRepresentation":106,"./UserRepresentation":148}],107:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -35331,10 +36075,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287}],108:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330}],108:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -35409,10 +36153,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287}],109:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330}],109:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -35501,10 +36245,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287}],110:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330}],110:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -35593,10 +36337,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287,"./LightGroupRepresentation":110}],111:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330,"./LightGroupRepresentation":110}],111:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -35664,10 +36408,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287}],112:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330}],112:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -35763,10 +36507,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287}],113:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330}],113:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -35822,10 +36566,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287}],114:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330}],114:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -35881,10 +36625,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287}],115:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330}],115:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -35940,10 +36684,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287}],116:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330}],116:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -35999,10 +36743,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287}],117:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330}],117:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -36168,10 +36912,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287}],118:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330}],118:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -36223,10 +36967,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287}],119:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330}],119:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -36294,10 +37038,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287}],120:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330}],120:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -36399,10 +37143,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287}],121:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330}],121:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -36498,10 +37242,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287}],122:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330}],122:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -36590,10 +37334,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287,"./ProcessInstanceFilterRepresentation":121}],123:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330,"./ProcessInstanceFilterRepresentation":121}],123:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -36766,10 +37510,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287,"./LightUserRepresentation":112,"./RestVariable":131}],124:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330,"./LightUserRepresentation":112,"./RestVariable":131}],124:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
     if (typeof define === 'function' && define.amd) {
@@ -36844,10 +37588,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
     return exports;
 });
 
-},{"../../../alfrescoApiClient":287}],125:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330}],125:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -36915,10 +37659,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287}],126:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330}],126:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -37070,10 +37814,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287,"./FormScopeRepresentation":102}],127:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330,"./FormScopeRepresentation":102}],127:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -37141,10 +37885,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287,"./ProcessScopeIdentifierRepresentation":125}],128:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330,"./ProcessScopeIdentifierRepresentation":125}],128:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -37219,10 +37963,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287,"./LightGroupRepresentation":110,"./LightUserRepresentation":112}],129:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330,"./LightGroupRepresentation":110,"./LightUserRepresentation":112}],129:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -37367,10 +38111,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287,"./LightUserRepresentation":112}],130:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330,"./LightUserRepresentation":112}],130:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -37431,10 +38175,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287}],131:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330}],131:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -37523,10 +38267,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287}],132:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330}],132:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -37608,10 +38352,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287,"./AbstractRepresentation":71}],133:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330,"./AbstractRepresentation":71}],133:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -37672,10 +38416,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287,"./AppDefinitionRepresentation":76}],134:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330,"./AppDefinitionRepresentation":76}],134:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -37736,10 +38480,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287}],135:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330}],135:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -37814,10 +38558,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287}],136:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330}],136:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -37878,10 +38622,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287}],137:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330}],137:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -37998,10 +38742,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287}],138:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330}],138:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -38099,10 +38843,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287,"./TaskFilterRepresentation":137}],139:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330,"./TaskFilterRepresentation":137}],139:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
     if (typeof define === 'function' && define.amd) {
@@ -38198,10 +38942,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
     return exports;
 });
 
-},{"../../../alfrescoApiClient":287}],140:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330}],140:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -38451,10 +39195,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287,"./LightUserRepresentation":112}],141:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330,"./LightUserRepresentation":112}],141:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -38550,10 +39294,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287}],142:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330}],142:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -38656,10 +39400,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287}],143:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330}],143:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -38769,10 +39513,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287}],144:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330}],144:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -38840,10 +39584,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287}],145:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330}],145:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -38918,10 +39662,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287}],146:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330}],146:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -38989,10 +39733,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287}],147:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330}],147:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -39095,10 +39839,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287,"./ProcessInstanceFilterRepresentation":121}],148:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330,"./ProcessInstanceFilterRepresentation":121}],148:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -39292,10 +40036,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287,"./GroupRepresentation":106,"./LightAppRepresentation":109}],149:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330,"./GroupRepresentation":106,"./LightAppRepresentation":109}],149:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -39398,10 +40142,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287,"./TaskFilterRepresentation":137}],150:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330,"./TaskFilterRepresentation":137}],150:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -39504,10 +40248,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287}],151:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330}],151:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -39610,10 +40354,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287}],152:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330}],152:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -39721,10 +40465,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287,"../model/Error":154,"../model/LoginRequest":156,"../model/LoginTicketEntry":157,"../model/ValidateTicketEntry":159}],153:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330,"../model/Error":154,"../model/LoginRequest":156,"../model/LoginTicketEntry":157,"../model/ValidateTicketEntry":159}],153:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (factory) {
   if (typeof define === 'function' && define.amd) {
@@ -39820,10 +40564,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../alfrescoApiClient":287,"./api/AuthenticationApi":152,"./model/Error":154,"./model/ErrorError":155,"./model/LoginRequest":156,"./model/LoginTicketEntry":157,"./model/LoginTicketEntryEntry":158,"./model/ValidateTicketEntry":159,"./model/ValidateTicketEntryEntry":160}],154:[function(require,module,exports){
+},{"../../alfrescoApiClient":330,"./api/AuthenticationApi":152,"./model/Error":154,"./model/ErrorError":155,"./model/LoginRequest":156,"./model/LoginTicketEntry":157,"./model/LoginTicketEntryEntry":158,"./model/ValidateTicketEntry":159,"./model/ValidateTicketEntryEntry":160}],154:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -39882,10 +40626,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287,"./ErrorError":155}],155:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330,"./ErrorError":155}],155:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -39995,10 +40739,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287}],156:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330}],156:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -40065,10 +40809,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287}],157:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330}],157:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -40127,10 +40871,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287,"./LoginTicketEntryEntry":158}],158:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330,"./LoginTicketEntryEntry":158}],158:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -40197,10 +40941,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287}],159:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330}],159:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -40259,10 +41003,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287,"./ValidateTicketEntryEntry":160}],160:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330,"./ValidateTicketEntryEntry":160}],160:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -40321,11 +41065,11 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   return exports;
 });
 
-},{"../../../alfrescoApiClient":287}],161:[function(require,module,exports){
+},{"../../../alfrescoApiClient":330}],161:[function(require,module,exports){
 (function (Buffer){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -40464,7 +41208,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   exports.prototype.isFileParam = function (param) {
     // fs.ReadStream in Node.js (but not in runtime like browserify)
     if (typeof window === 'undefined' && typeof require === 'function' && require('fs') && param instanceof require('fs').ReadStream) {
-      return true;r;
+      return true;
     }
     // Buffer in Node.js
     if (typeof Buffer === 'function' && param instanceof Buffer) {
@@ -40807,7 +41551,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"buffer":4,"fs":3,"superagent":25}],162:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -41000,7 +41744,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161,"../model/AssocTargetBody":184,"../model/Error":202,"../model/NodeAssocPaging":216}],163:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -42361,7 +43105,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161,"../model/AssocChildBody":182,"../model/AssocTargetBody":184,"../model/CopyBody":194,"../model/DeletedNodeEntry":196,"../model/DeletedNodesPaging":199,"../model/EmailSharedLinkBody":201,"../model/Error":202,"../model/MoveBody":212,"../model/NodeAssocPaging":216,"../model/NodeBody":218,"../model/NodeBody1":219,"../model/NodeChildAssocPaging":222,"../model/NodeEntry":224,"../model/NodePaging":228,"../model/NodeSharedLinkEntry":231,"../model/NodeSharedLinkPaging":232,"../model/RenditionBody":255,"../model/RenditionEntry":256,"../model/RenditionPaging":257,"../model/SharedLinkBody":259,"../model/SiteBody":261,"../model/SiteEntry":265}],164:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -42723,7 +43467,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161,"../model/AssocChildBody":182,"../model/Error":202,"../model/MoveBody":212,"../model/NodeAssocPaging":216,"../model/NodeBody1":219,"../model/NodeChildAssocPaging":222,"../model/NodeEntry":224,"../model/NodePaging":228}],165:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -42921,7 +43665,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161,"../model/CommentBody":187,"../model/CommentBody1":188,"../model/CommentEntry":189,"../model/CommentPaging":190,"../model/Error":202}],166:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -43115,7 +43859,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161,"../model/Error":202,"../model/FavoriteBody":205,"../model/FavoriteEntry":206,"../model/FavoritePaging":207}],167:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -43192,7 +43936,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161,"../model/Error":202,"../model/PersonNetworkEntry":241}],168:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -43727,7 +44471,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161,"../model/CopyBody":194,"../model/DeletedNodeEntry":196,"../model/DeletedNodesPaging":199,"../model/Error":202,"../model/MoveBody":212,"../model/NodeBody":218,"../model/NodeBody1":219,"../model/NodeEntry":224,"../model/NodePaging":228}],169:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -44536,7 +45280,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161,"../model/ActivityPaging":180,"../model/Error":202,"../model/FavoriteBody":205,"../model/FavoriteEntry":206,"../model/FavoritePaging":207,"../model/FavoriteSiteBody":209,"../model/InlineResponse201":210,"../model/PersonEntry":239,"../model/PersonNetworkEntry":241,"../model/PersonNetworkPaging":242,"../model/PreferenceEntry":245,"../model/PreferencePaging":246,"../model/SiteEntry":265,"../model/SiteMembershipBody":271,"../model/SiteMembershipBody1":272,"../model/SiteMembershipRequestEntry":274,"../model/SiteMembershipRequestPaging":275,"../model/SitePaging":277}],170:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -44624,7 +45368,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161,"../model/Error":202,"../model/NodePaging":228}],171:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -44816,7 +45560,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161,"../model/Error":202,"../model/RatingBody":250,"../model/RatingEntry":251,"../model/RatingPaging":252}],172:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -45073,7 +45817,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161,"../model/Error":202,"../model/RenditionBody":255,"../model/RenditionEntry":256,"../model/RenditionPaging":257}],173:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -45314,7 +46058,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161,"../model/EmailSharedLinkBody":201,"../model/Error":202,"../model/NodeSharedLinkEntry":231,"../model/NodeSharedLinkPaging":232,"../model/SharedLinkBody":259}],174:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -45764,7 +46508,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161,"../model/Error":202,"../model/SiteBody":261,"../model/SiteContainerEntry":263,"../model/SiteContainerPaging":264,"../model/SiteEntry":265,"../model/SiteMemberBody":267,"../model/SiteMemberEntry":268,"../model/SiteMemberPaging":269,"../model/SiteMemberRoleBody":270,"../model/SitePaging":277}],175:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -46014,7 +46758,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161,"../model/Error":202,"../model/TagBody":280,"../model/TagBody1":281,"../model/TagEntry":282,"../model/TagPaging":283}],176:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (factory) {
   if (typeof define === 'function' && define.amd) {
@@ -46688,7 +47432,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"./ApiClient":161,"./api/AssociationsApi":162,"./api/ChangesApi":163,"./api/ChildAssociationsApi":164,"./api/CommentsApi":165,"./api/FavoritesApi":166,"./api/NetworksApi":167,"./api/NodesApi":168,"./api/PeopleApi":169,"./api/QueriesApi":170,"./api/RatingsApi":171,"./api/RenditionsApi":172,"./api/SharedlinksApi":173,"./api/SitesApi":174,"./api/TagsApi":175,"./model/Activity":177,"./model/ActivityActivitySummary":178,"./model/ActivityEntry":179,"./model/ActivityPaging":180,"./model/ActivityPagingList":181,"./model/AssocChildBody":182,"./model/AssocInfo":183,"./model/AssocTargetBody":184,"./model/ChildAssocInfo":185,"./model/Comment":186,"./model/CommentBody":187,"./model/CommentBody1":188,"./model/CommentEntry":189,"./model/CommentPaging":190,"./model/CommentPagingList":191,"./model/Company":192,"./model/ContentInfo":193,"./model/CopyBody":194,"./model/DeletedNode":195,"./model/DeletedNodeEntry":196,"./model/DeletedNodeMinimal":197,"./model/DeletedNodeMinimalEntry":198,"./model/DeletedNodesPaging":199,"./model/DeletedNodesPagingList":200,"./model/EmailSharedLinkBody":201,"./model/Error":202,"./model/ErrorError":203,"./model/Favorite":204,"./model/FavoriteBody":205,"./model/FavoriteEntry":206,"./model/FavoritePaging":207,"./model/FavoritePagingList":208,"./model/FavoriteSiteBody":209,"./model/InlineResponse201":210,"./model/InlineResponse201Entry":211,"./model/MoveBody":212,"./model/NetworkQuota":213,"./model/NodeAssocMinimal":214,"./model/NodeAssocMinimalEntry":215,"./model/NodeAssocPaging":216,"./model/NodeAssocPagingList":217,"./model/NodeBody":218,"./model/NodeBody1":219,"./model/NodeChildAssocMinimal":220,"./model/NodeChildAssocMinimalEntry":221,"./model/NodeChildAssocPaging":222,"./model/NodeChildAssocPagingList":223,"./model/NodeEntry":224,"./model/NodeFull":225,"./model/NodeMinimal":226,"./model/NodeMinimalEntry":227,"./model/NodePaging":228,"./model/NodePagingList":229,"./model/NodeSharedLink":230,"./model/NodeSharedLinkEntry":231,"./model/NodeSharedLinkPaging":232,"./model/NodeSharedLinkPagingList":233,"./model/NodesnodeIdchildrenContent":234,"./model/Pagination":235,"./model/PathElement":236,"./model/PathInfo":237,"./model/Person":238,"./model/PersonEntry":239,"./model/PersonNetwork":240,"./model/PersonNetworkEntry":241,"./model/PersonNetworkPaging":242,"./model/PersonNetworkPagingList":243,"./model/Preference":244,"./model/PreferenceEntry":245,"./model/PreferencePaging":246,"./model/PreferencePagingList":247,"./model/Rating":248,"./model/RatingAggregate":249,"./model/RatingBody":250,"./model/RatingEntry":251,"./model/RatingPaging":252,"./model/RatingPagingList":253,"./model/Rendition":254,"./model/RenditionBody":255,"./model/RenditionEntry":256,"./model/RenditionPaging":257,"./model/RenditionPagingList":258,"./model/SharedLinkBody":259,"./model/Site":260,"./model/SiteBody":261,"./model/SiteContainer":262,"./model/SiteContainerEntry":263,"./model/SiteContainerPaging":264,"./model/SiteEntry":265,"./model/SiteMember":266,"./model/SiteMemberBody":267,"./model/SiteMemberEntry":268,"./model/SiteMemberPaging":269,"./model/SiteMemberRoleBody":270,"./model/SiteMembershipBody":271,"./model/SiteMembershipBody1":272,"./model/SiteMembershipRequest":273,"./model/SiteMembershipRequestEntry":274,"./model/SiteMembershipRequestPaging":275,"./model/SiteMembershipRequestPagingList":276,"./model/SitePaging":277,"./model/SitePagingList":278,"./model/Tag":279,"./model/TagBody":280,"./model/TagBody1":281,"./model/TagEntry":282,"./model/TagPaging":283,"./model/TagPagingList":284,"./model/UserInfo":285}],177:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -46962,7 +47706,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161,"./ActivityActivitySummary":178}],178:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -47057,7 +47801,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161}],179:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -47123,7 +47867,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161,"./Activity":177}],180:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -47185,7 +47929,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161,"./ActivityPagingList":181}],181:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -47261,7 +48005,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161,"./ActivityEntry":179,"./Pagination":235}],182:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -47331,7 +48075,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161}],183:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -47393,7 +48137,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161}],184:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -47463,7 +48207,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161}],185:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -47533,7 +48277,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161}],186:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -47679,7 +48423,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161,"./Person":238}],187:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -47745,7 +48489,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161}],188:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -47811,7 +48555,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161}],189:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -47877,7 +48621,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161,"./Comment":186}],190:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -47939,7 +48683,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161,"./CommentPagingList":191}],191:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -48015,7 +48759,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161,"./CommentEntry":189,"./Pagination":235}],192:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -48133,7 +48877,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161}],193:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -48219,7 +48963,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161}],194:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -48289,7 +49033,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161}],195:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -48369,7 +49113,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161,"./ContentInfo":193,"./NodeFull":225,"./UserInfo":285}],196:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -48431,7 +49175,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161,"./DeletedNode":195}],197:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -48511,7 +49255,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161,"./ContentInfo":193,"./NodeMinimal":226,"./PathElement":236,"./UserInfo":285}],198:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -48573,7 +49317,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161,"./DeletedNodeMinimal":197}],199:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -48635,7 +49379,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161,"./DeletedNodesPagingList":200}],200:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -48705,7 +49449,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161,"./DeletedNodeMinimalEntry":198,"./Pagination":235}],201:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -48791,7 +49535,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161}],202:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -48853,7 +49597,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161,"./ErrorError":203}],203:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -48966,7 +49710,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161}],204:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -49054,7 +49798,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161}],205:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -49120,7 +49864,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161}],206:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -49186,7 +49930,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161,"./Favorite":204}],207:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -49248,7 +49992,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161,"./FavoritePagingList":208}],208:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -49324,7 +50068,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161,"./FavoriteEntry":206,"./Pagination":235}],209:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -49386,7 +50130,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161}],210:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -49448,7 +50192,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161,"./InlineResponse201Entry":211}],211:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -49514,7 +50258,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161}],212:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -49584,7 +50328,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161}],213:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -49671,7 +50415,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161}],214:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -49821,7 +50565,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161,"./AssocInfo":183,"./ContentInfo":193,"./UserInfo":285}],215:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -49887,7 +50631,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161,"./NodeAssocMinimal":214}],216:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -49949,7 +50693,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161,"./NodeAssocPagingList":217}],217:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -50019,7 +50763,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161,"./NodeAssocMinimalEntry":215,"./Pagination":235}],218:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -50105,7 +50849,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161}],219:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -50207,7 +50951,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161,"./NodesnodeIdchildrenContent":234}],220:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -50357,7 +51101,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161,"./ChildAssocInfo":185,"./ContentInfo":193,"./UserInfo":285}],221:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -50423,7 +51167,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161,"./NodeChildAssocMinimal":220}],222:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -50485,7 +51229,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161,"./NodeChildAssocPagingList":223}],223:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -50555,7 +51299,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161,"./NodeChildAssocMinimalEntry":221,"./Pagination":235}],224:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -50621,7 +51365,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161,"./NodeFull":225}],225:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -50787,7 +51531,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161,"./ContentInfo":193,"./UserInfo":285}],226:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -50940,7 +51684,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161,"./ContentInfo":193,"./PathElement":236,"./UserInfo":285}],227:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -51006,7 +51750,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161,"./NodeMinimal":226}],228:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -51068,7 +51812,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161,"./NodePagingList":229}],229:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -51138,7 +51882,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161,"./NodeMinimalEntry":227,"./Pagination":235}],230:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -51256,7 +52000,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161,"./ContentInfo":193,"./UserInfo":285}],231:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -51322,7 +52066,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161,"./NodeSharedLink":230}],232:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -51384,7 +52128,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161,"./NodeSharedLinkPagingList":233}],233:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -51460,7 +52204,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161,"./NodeSharedLinkEntry":231,"./Pagination":235}],234:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -51530,7 +52274,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161}],235:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -51640,7 +52384,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161}],236:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -51710,7 +52454,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161}],237:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -51788,7 +52532,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161,"./PathElement":236}],238:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -52001,7 +52745,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161,"./Company":192}],239:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -52067,7 +52811,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161,"./Person":238}],240:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -52212,7 +52956,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161,"./NetworkQuota":213}],241:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -52278,7 +53022,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161,"./PersonNetwork":240}],242:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -52340,7 +53084,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161,"./PersonNetworkPagingList":243}],243:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -52416,7 +53160,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161,"./Pagination":235,"./PersonNetworkEntry":241}],244:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -52495,7 +53239,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161}],245:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -52561,7 +53305,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161,"./Preference":244}],246:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -52623,7 +53367,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161,"./PreferencePagingList":247}],247:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -52699,7 +53443,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161,"./Pagination":235,"./PreferenceEntry":245}],248:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -52791,7 +53535,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161,"./RatingAggregate":249}],249:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -52865,7 +53609,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161}],250:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -52963,7 +53707,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161}],251:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -53029,7 +53773,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161,"./Rating":248}],252:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -53091,7 +53835,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161,"./RatingPagingList":253}],253:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -53167,7 +53911,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161,"./Pagination":235,"./RatingEntry":251}],254:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -53245,7 +53989,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161,"./ContentInfo":193}],255:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -53307,7 +54051,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161}],256:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -53373,7 +54117,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161,"./Rendition":254}],257:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -53435,7 +54179,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161,"./RenditionPagingList":258}],258:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -53505,7 +54249,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161,"./Pagination":235,"./RenditionEntry":256}],259:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -53567,7 +54311,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161}],260:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -53705,7 +54449,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161}],261:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -53824,7 +54568,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161}],262:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -53900,7 +54644,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161}],263:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -53966,7 +54710,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161,"./SiteContainer":262}],264:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -54028,7 +54772,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161,"./SitePagingList":278}],265:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -54094,7 +54838,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161,"./Site":260}],266:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -54211,7 +54955,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161,"./Person":238}],267:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -54312,7 +55056,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161}],268:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -54378,7 +55122,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161,"./SiteMember":266}],269:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -54440,7 +55184,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161,"./SitePagingList":278}],270:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -54533,7 +55277,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161}],271:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -54611,7 +55355,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161}],272:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -54673,7 +55417,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161}],273:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -54759,7 +55503,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161,"./Site":260}],274:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -54825,7 +55569,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161,"./SiteMembershipRequest":273}],275:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -54887,7 +55631,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161,"./SiteMembershipRequestPagingList":276}],276:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -54963,7 +55707,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161,"./Pagination":235,"./SiteMembershipRequestEntry":274}],277:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -55025,7 +55769,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161,"./SitePagingList":278}],278:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -55091,7 +55835,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161,"./Pagination":235}],279:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -55167,7 +55911,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161}],280:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -55233,7 +55977,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161}],281:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -55295,7 +56039,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161}],282:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -55361,7 +56105,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161,"./Tag":279}],283:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -55423,7 +56167,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161,"./TagPagingList":284}],284:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -55499,7 +56243,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161,"./Pagination":235,"./TagEntry":282}],285:[function(require,module,exports){
 'use strict';
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol ? "symbol" : typeof obj; };
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
@@ -55569,11 +56313,4678 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 },{"../ApiClient":161}],286:[function(require,module,exports){
 'use strict';
 
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
+
+(function (root, factory) {
+  if (typeof define === 'function' && define.amd) {
+    // AMD. Register as an anonymous module.
+    define(['../../../alfrescoApiClient', '../model/Error', '../model/DeploymentEntry', '../model/DeploymentPaging'], factory);
+  } else if ((typeof module === 'undefined' ? 'undefined' : _typeof(module)) === 'object' && module.exports) {
+    // CommonJS-like environments that support module.exports, like Node.
+    module.exports = factory(require('../../../alfrescoApiClient'), require('../model/Error'), require('../model/DeploymentEntry'), require('../model/DeploymentPaging'));
+  } else {
+    // Browser globals (root is window)
+    if (!root.AlfrescoWorkflowRestApi) {
+      root.AlfrescoWorkflowRestApi = {};
+    }
+    root.AlfrescoWorkflowRestApi.DeploymentsApi = factory(root.AlfrescoWorkflowRestApi.ApiClient, root.AlfrescoWorkflowRestApi.Error, root.AlfrescoWorkflowRestApi.DeploymentEntry, root.AlfrescoWorkflowRestApi.DeploymentPaging);
+  }
+})(undefined, function (ApiClient, Error, DeploymentEntry, DeploymentPaging) {
+  'use strict';
+
+  /**
+   * Deployments service.
+   * @module api/DeploymentsApi
+   * @version 0.1.0
+   */
+
+  /**
+   * Constructs a new deploymentsApi. 
+   * @alias module:api/deploymentsApi
+   * @class
+   * @param {module:ApiClient} apiClient Optional API client implementation to use, default to {@link module:ApiClient#instance}
+   * if unspecified.
+   */
+
+  var exports = function exports(apiClient) {
+    this.apiClient = apiClient || ApiClient.instance;
+
+    /**
+     * Delete a Deployment
+     * Deletes the Deployment with **deploymentId The identifier of a Deployment.
+     * @param {Object} opts Optional parameters
+     * @param {Boolean} opts.permanent Flag to indicate whether the Deployment should be permanently deleted i.e. bypass the trashcan. (default to false)
+     */
+    this.deleteDeployment = function (deploymentId, opts) {
+      opts = opts || {};
+      var postBody = null;
+
+      // verify the required parameter 'deploymentId' is set
+      if (deploymentId == undefined || deploymentId == null) {
+        throw "Missing the required parameter 'deploymentId' when calling deleteDeployment";
+      }
+
+      var pathParams = {
+        'deploymentId': deploymentId
+      };
+      var queryParams = {
+        'permanent': opts['permanent']
+      };
+      var headerParams = {};
+      var formParams = {};
+
+      var authNames = ['basicAuth'];
+      var contentTypes = ['application/json'];
+      var accepts = ['application/json'];
+      var returnType = null;
+
+      return this.apiClient.callApi('/deployments/{deploymentId}', 'DELETE', pathParams, queryParams, headerParams, formParams, postBody, authNames, contentTypes, accepts, returnType);
+    };
+
+    /**
+     * Get a Deployment
+     * Returns information for Deployment **deploymentId**.\n\nYou can use the **relations** parameter to include one or more related\nentities in a single response and so reduce network traffic.\n\nThe entity types in Alfresco are organized in a tree structure.\nThe **deployments** entity has two children, **containers** and **members**.\nThe following relations parameter returns all the container and member\nobjects related to the Deployment **deploymentId**:\n\n&#x60;&#x60;&#x60;\ncontainers,members\n&#x60;&#x60;&#x60;\n
+     * @param {String} deploymentId The identifier of a Deployment.
+     * @param {Object} opts Optional parameters
+     * @param {Array.<String>} opts.relations Use the relations parameter to include one or more related entities in a single response.
+     * @param {Array.<String>} opts.fields A list of field names.\n\nYou can use this parameter to restrict the fields\nreturned within a response if, for example, you want to save on overall bandwidth.\n\nThe list applies to a returned individual\nentity or entries within a collection.\n\nIf the API method also supports the **include**\nparameter, then the fields specified in the **include**\nparameter are returned in addition to those specified in the **fields** parameter.\n
+     * data is of type: {module:model/DeploymentEntry}
+     */
+    this.getDeployment = function (deploymentId, opts) {
+      opts = opts || {};
+      var postBody = null;
+
+      // verify the required parameter 'deploymentId' is set
+      if (deploymentId == undefined || deploymentId == null) {
+        throw "Missing the required parameter 'deploymentId' when calling getDeployment";
+      }
+
+      var pathParams = {
+        'deploymentId': deploymentId
+      };
+      var queryParams = {
+        'relations': this.apiClient.buildCollectionParam(opts['relations'], 'csv'),
+        'fields': this.apiClient.buildCollectionParam(opts['fields'], 'csv')
+      };
+      var headerParams = {};
+      var formParams = {};
+
+      var authNames = ['basicAuth'];
+      var contentTypes = ['application/json'];
+      var accepts = ['application/json'];
+      var returnType = DeploymentEntry;
+
+      return this.apiClient.callApi('/deployments/{deploymentId}', 'GET', pathParams, queryParams, headerParams, formParams, postBody, authNames, contentTypes, accepts, returnType);
+    };
+
+    /**
+     * Get deployments
+     * Returns a list of deployments in this repository. You can sort the list of deployments using the **orderBy** parameter.\n**orderBy** specifies the name of one or more\ncomma separated properties.\nFor each property you can optionally specify the order direction.\nBoth of the these **orderBy** examples retrieve deployments ordered by ascending name:\n\n&#x60;&#x60;&#x60;\nname\nname ASC\n&#x60;&#x60;&#x60;\n\nYou can use the **relations** parameter to include one or more related\nentities in a single response and so reduce network traffic.\n\nThe entity types in Alfresco are organized in a tree structure.\nThe **deployments** entity has two children, **containers** and **members**.\nThe following relations parameter returns all the container and member\nobjects related to each Deployment:\n\n&#x60;&#x60;&#x60;\ncontainers,members\n&#x60;&#x60;&#x60;\n
+     * @param {Object} opts Optional parameters
+     * @param {Integer} opts.skipCount The number of entities that exist in the collection before those included in this list.
+     * @param {Integer} opts.maxItems The maximum number of items to return in the list.
+     * @param {String} opts.orderBy A string to control the order of the entities returned.
+     * @param {Array.<String>} opts.relations Use the relations parameter to include one or more related entities in a single response.
+     * @param {Array.<String>} opts.fields A list of field names.\n\nYou can use this parameter to restrict the fields\nreturned within a response if, for example, you want to save on overall bandwidth.\n\nThe list applies to a returned individual\nentity or entries within a collection.\n\nIf the API method also supports the **include**\nparameter, then the fields specified in the **include**\nparameter are returned in addition to those specified in the **fields** parameter.\n
+     * data is of type: {module:model/DeploymentPaging}
+     */
+    this.getDeployments = function (opts) {
+      opts = opts || {};
+      var postBody = null;
+
+      var pathParams = {};
+      var queryParams = {
+        'skipCount': opts['skipCount'],
+        'maxItems': opts['maxItems'],
+        'orderBy': opts['orderBy'],
+        'relations': this.apiClient.buildCollectionParam(opts['relations'], 'csv'),
+        'fields': this.apiClient.buildCollectionParam(opts['fields'], 'csv')
+      };
+      var headerParams = {};
+      var formParams = {};
+
+      var authNames = ['basicAuth'];
+      var contentTypes = ['application/json'];
+      var accepts = ['application/json'];
+      var returnType = DeploymentPaging;
+
+      return this.apiClient.callApi('/deployments', 'GET', pathParams, queryParams, headerParams, formParams, postBody, authNames, contentTypes, accepts, returnType);
+    };
+  };
+
+  return exports;
+});
+
+},{"../../../alfrescoApiClient":330,"../model/DeploymentEntry":294,"../model/DeploymentPaging":295,"../model/Error":297}],287:[function(require,module,exports){
+'use strict';
+
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
+
+(function (root, factory) {
+  if (typeof define === 'function' && define.amd) {
+    // AMD. Register as an anonymous module.
+    define(['../../../alfrescoApiClient', '../model/Error', '../model/ProcessDefinitionEntry', '../model/ProcessDefinitionPaging'], factory);
+  } else if ((typeof module === 'undefined' ? 'undefined' : _typeof(module)) === 'object' && module.exports) {
+    // CommonJS-like environments that support module.exports, like Node.
+    module.exports = factory(require('../../../alfrescoApiClient'), require('../model/Error'), require('../model/ProcessDefinitionEntry'), require('../model/ProcessDefinitionPaging'));
+  } else {
+    // Browser globals (root is window)
+    if (!root.AlfrescoWorkflowRestApi) {
+      root.AlfrescoWorkflowRestApi = {};
+    }
+    root.AlfrescoWorkflowRestApi.ProcessDefinitionsApi = factory(root.AlfrescoWorkflowRestApi.ApiClient, root.AlfrescoWorkflowRestApi.Error, root.AlfrescoWorkflowRestApi.ProcessDefinitionEntry, root.AlfrescoWorkflowRestApi.ProcessDefinitionPaging);
+  }
+})(undefined, function (ApiClient, Error, ProcessDefinitionEntry, ProcessDefinitionPaging) {
+  'use strict';
+
+  /**
+   * Process definitions service.
+   * @module api/ProcessDefinitionsApi
+   * @version 0.1.0
+   */
+
+  /**
+   * Constructs a new processDefinitionsApi. 
+   * @alias module:api/processDefinitionsApi
+   * @class
+   * @param {module:ApiClient} apiClient Optional API client implementation to use, default to {@link module:ApiClient#instance}
+   * if unspecified.
+   */
+
+  var exports = function exports(apiClient) {
+    this.apiClient = apiClient || ApiClient.instance;
+
+    /**
+     * Get a ProcessDefinition
+     * Returns information for ProcessDefinition **ProcessDefinitionId**.\n\nYou can use the **relations** parameter to include one or more related\nentities in a single response and so reduce network traffic.\n\nThe entity types in Alfresco are organized in a tree structure.\nThe **ProcessDefinitions** entity has two children, **containers** and **members**.\nThe following relations parameter returns all the container and member\nobjects related to the ProcessDefinition **ProcessDefinitionId**:\n\n&#x60;&#x60;&#x60;\ncontainers,members\n&#x60;&#x60;&#x60;\n
+     * @param {String} processDefinitionId The identifier of a Process Definition.
+     * @param {Object} opts Optional parameters
+     * @param {Array.<String>} opts.relations Use the relations parameter to include one or more related entities in a single response.
+     * @param {Array.<String>} opts.fields A list of field names.\n\nYou can use this parameter to restrict the fields\nreturned within a response if, for example, you want to save on overall bandwidth.\n\nThe list applies to a returned individual\nentity or entries within a collection.\n\nIf the API method also supports the **include**\nparameter, then the fields specified in the **include**\nparameter are returned in addition to those specified in the **fields** parameter.\n
+     * data is of type: {module:model/ProcessDefinitionEntry}
+     */
+    this.getProcessDefinition = function (processDefinitionId, opts) {
+      opts = opts || {};
+      var postBody = null;
+
+      // verify the required parameter 'ProcessDefinitionId' is set
+      if (processDefinitionId == undefined || processDefinitionId == null) {
+        throw "Missing the required parameter 'processDefinitionId' when calling getProcessDefinition";
+      }
+
+      var pathParams = {
+        'processDefinitionId': processDefinitionId
+      };
+      var queryParams = {
+        'relations': this.apiClient.buildCollectionParam(opts['relations'], 'csv'),
+        'fields': this.apiClient.buildCollectionParam(opts['fields'], 'csv')
+      };
+      var headerParams = {};
+      var formParams = {};
+
+      var authNames = ['basicAuth'];
+      var contentTypes = ['application/json'];
+      var accepts = ['application/json'];
+      var returnType = ProcessDefinitionEntry;
+
+      return this.apiClient.callApi('/processDefinitions/{processDefinitionId}', 'GET', pathParams, queryParams, headerParams, formParams, postBody, authNames, contentTypes, accepts, returnType);
+    };
+
+    /**
+     * Get ProcessDefinitions
+     * Returns a list of ProcessDefinitions in this repository. You can sort the list of ProcessDefinitions using the **orderBy** parameter.\n**orderBy** specifies the name of one or more\ncomma separated properties.\nFor each property you can optionally specify the order direction.\nBoth of the these **orderBy** examples retrieve ProcessDefinitions ordered by ascending name:\n\n&#x60;&#x60;&#x60;\nname\nname ASC\n&#x60;&#x60;&#x60;\n\nYou can use the **relations** parameter to include one or more related\nentities in a single response and so reduce network traffic.\n\nThe entity types in Alfresco are organized in a tree structure.\nThe **ProcessDefinitions** entity has two children, **containers** and **members**.\nThe following relations parameter returns all the container and member\nobjects related to each ProcessDefinition:\n\n&#x60;&#x60;&#x60;\ncontainers,members\n&#x60;&#x60;&#x60;\n
+     * @param {Object} opts Optional parameters
+     * @param {Integer} opts.skipCount The number of entities that exist in the collection before those included in this list.
+     * @param {Integer} opts.maxItems The maximum number of items to return in the list.
+     * @param {String} opts.orderBy A string to control the order of the entities returned.
+     * @param {Array.<String>} opts.relations Use the relations parameter to include one or more related entities in a single response.
+     * @param {Array.<String>} opts.fields A list of field names.\n\nYou can use this parameter to restrict the fields\nreturned within a response if, for example, you want to save on overall bandwidth.\n\nThe list applies to a returned individual\nentity or entries within a collection.\n\nIf the API method also supports the **include**\nparameter, then the fields specified in the **include**\nparameter are returned in addition to those specified in the **fields** parameter.\n
+     * data is of type: {module:model/ProcessDefinitionPaging}
+     */
+    this.getProcessDefinitions = function (opts) {
+      opts = opts || {};
+      var postBody = null;
+
+      var pathParams = {};
+      var queryParams = {
+        'skipCount': opts['skipCount'],
+        'maxItems': opts['maxItems'],
+        'orderBy': opts['orderBy'],
+        'relations': this.apiClient.buildCollectionParam(opts['relations'], 'csv'),
+        'fields': this.apiClient.buildCollectionParam(opts['fields'], 'csv')
+      };
+      var headerParams = {};
+      var formParams = {};
+
+      var authNames = ['basicAuth'];
+      var contentTypes = ['application/json'];
+      var accepts = ['application/json'];
+      var returnType = ProcessDefinitionPaging;
+
+      return this.apiClient.callApi('/process-definitions', 'GET', pathParams, queryParams, headerParams, formParams, postBody, authNames, contentTypes, accepts, returnType);
+    };
+
+    /**
+     * Get a Process Definition Image
+     * Returns diagram image for ProcessDefinition **ProcessDefinitionId**.\n\nYou can use the **relations** parameter to include one or more related\nentities in a single response and so reduce network traffic.\n\nThe entity types in Alfresco are organized in a tree structure.\nThe **ProcessDefinitions** entity has two children, **containers** and **members**.\nThe following relations parameter returns all the container and member\nobjects related to the ProcessDefinition **ProcessDefinitionId**:\n\n&#x60;&#x60;&#x60;\ncontainers,members\n&#x60;&#x60;&#x60;\n
+     * @param {String} processDefinitionId The identifier of a ProcessDefinition.
+     * @param {Object} opts Optional parameters
+     * @param {Array.<String>} opts.relations Use the relations parameter to include one or more related entities in a single response.
+     * @param {Array.<String>} opts.fields A list of field names.\n\nYou can use this parameter to restrict the fields\nreturned within a response if, for example, you want to save on overall bandwidth.\n\nThe list applies to a returned individual\nentity or entries within a collection.\n\nIf the API method also supports the **include**\nparameter, then the fields specified in the **include**\nparameter are returned in addition to those specified in the **fields** parameter.\n
+     * data is of type: {module:model/ProcessDefinitionEntry}
+     */
+    this.getProcessDefinitionImage = function (processDefinitionId, opts) {
+      opts = opts || {};
+      var postBody = null;
+
+      // verify the required parameter 'ProcessDefinitionId' is set
+      if (processDefinitionId == undefined || processDefinitionId == null) {
+        throw "Missing the required parameter 'ProcessDefinitionId' when calling getProcessDefinition";
+      }
+
+      var pathParams = {
+        'processDefinitionId': processDefinitionId
+      };
+      var queryParams = {
+        'relations': this.apiClient.buildCollectionParam(opts['relations'], 'csv'),
+        'fields': this.apiClient.buildCollectionParam(opts['fields'], 'csv')
+      };
+      var headerParams = {};
+      var formParams = {};
+
+      var authNames = ['basicAuth'];
+      var contentTypes = ['application/json'];
+      var accepts = ['image/png'];
+      var returnType = Image;
+
+      return this.apiClient.callApi('/process-definitions/{processDefinitionId}', 'GET', pathParams, queryParams, headerParams, formParams, postBody, authNames, contentTypes, accepts, returnType);
+    };
+
+    /**
+     * Retrieve the start form model for a process definition
+     *  @param {String} processDefinitionId
+     *  @param {String} field
+     */
+    this.getProcessDefinitionStartFormModel = function (processDefinitionId) {
+      var postBody = null;
+
+      var pathParams = {
+        'processDefinitionId': processDefinitionId
+      };
+      var queryParams = {};
+      var headerParams = {};
+      var formParams = {};
+
+      var authNames = [];
+      var contentTypes = ['application/json'];
+      var accepts = ['application/json'];
+      var returnType = ProcessDefinitionStartFormPaging;
+
+      return this.apiClient.callApi('/process-definitions/{processDefinitionId}/start-form-model', 'GET', pathParams, queryParams, headerParams, formParams, postBody, authNames, contentTypes, accepts, returnType);
+    };
+  };
+
+  return exports;
+});
+
+},{"../../../alfrescoApiClient":330,"../model/Error":297,"../model/ProcessDefinitionEntry":303,"../model/ProcessDefinitionPaging":304}],288:[function(require,module,exports){
+'use strict';
+
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
+
+(function (root, factory) {
+  if (typeof define === 'function' && define.amd) {
+    // AMD. Register as an anonymous module.
+    define(['../../../alfrescoApiClient', '../model/Error', '../model/ProcessEntry', '../model/ProcessPaging', '../model/TaskPaging'], factory);
+  } else if ((typeof module === 'undefined' ? 'undefined' : _typeof(module)) === 'object' && module.exports) {
+    // CommonJS-like environments that support module.exports, like Node.
+    module.exports = factory(require('../../../alfrescoApiClient'), require('../model/Error'), require('../model/ProcessEntry'), require('../model/ProcessPaging'), require('../model/TaskPaging'));
+  } else {
+    // Browser globals (root is window)
+    if (!root.AlfrescoWorkflowRestApi) {
+      root.AlfrescoWorkflowRestApi = {};
+    }
+    root.AlfrescoWorkflowRestApi.ProcessesApi = factory(root.AlfrescoWorkflowRestApi.ApiClient, root.AlfrescoWorkflowRestApi.Error, root.AlfrescoWorkflowRestApi.ProcessEntry, root.AlfrescoWorkflowRestApi.ProcessPaging, root.AlfrescoWorkflowRestApi.TaskPaging);
+  }
+})(undefined, function (ApiClient, Error, ProcessEntry, ProcessPaging) {
+  'use strict';
+
+  /**
+   * Processes service.
+   * @module api/ProcessesApi
+   * @version 0.1.0
+   */
+
+  /**
+   * Constructs a new ProcessesApi. 
+   * @alias module:api/ProcessesApi
+   * @class
+   * @param {module:ApiClient} apiClient Optional API client implementation to use, default to {@link module:ApiClient#instance}
+   * if unspecified.
+   */
+
+  var exports = function exports(apiClient) {
+    this.apiClient = apiClient || ApiClient.instance;
+
+    /**
+     * Create a process
+     * Creates a default process with the given details.  Unless explicitly specified, the process id will be generated from the process title. The process id must be unique and only contain alphanumeric and/or dash\ncharacters.\n\nFor example, to create a public process called \&quot;Marketing\&quot; the following body could be used:\n&#x60;&#x60;&#x60;JSON\n{\n  \&quot;title\&quot;: \&quot;Marketing\&quot;,\n  \&quot;visibility\&quot;: \&quot;PUBLIC\&quot;\n}\n&#x60;&#x60;&#x60;\n\nThe creation of the (surf) configuration files required by Share can be skipped via the **skipConfiguration** query parameter.\n\n**Please note: if skipped then such a process will *not* work within Share.**\n\nThe addition of the process to the user&#39;s process favorites can be skipped via the **skipAddToFavorites** query parameter.\n\nThe creator will be added as a member with process Manager role.\n
+     * @param {module:model/ProcessBody} processBody The process details
+     * @param {Object} opts Optional parameters
+     * @param {Boolean} opts.skipConfiguration Flag to indicate whether the Share-specific (surf) configuration files for the process should not be created. (default to false)
+     * @param {Boolean} opts.skipAddToFavorites Flag to indicate whether the process should not be added to the user&#39;s process favorites. (default to false)
+     * data is of type: {module:model/ProcessEntry}
+     */
+    this.createProcess = function (processBody, opts) {
+      opts = opts || {};
+      var postBody = processBody;
+
+      // verify the required parameter 'processBody' is set
+      if (processBody == undefined || processBody == null) {
+        throw "Missing the required parameter 'processBody' when calling createProcess";
+      }
+
+      var pathParams = {};
+      var queryParams = {
+        'skipConfiguration': opts['skipConfiguration'],
+        'skipAddToFavorites': opts['skipAddToFavorites']
+      };
+      var headerParams = {};
+      var formParams = {};
+
+      var authNames = ['basicAuth'];
+      var contentTypes = ['application/json'];
+      var accepts = ['application/json'];
+      var returnType = ProcessEntry;
+
+      return this.apiClient.callApi('/processes', 'POST', pathParams, queryParams, headerParams, formParams, postBody, authNames, contentTypes, accepts, returnType);
+    };
+
+    /**
+     * Delete a Process
+     * Deletes the Process with **processId The identifier of a Process.
+     * @param {Object} opts Optional parameters
+     * @param {Boolean} opts.permanent Flag to indicate whether the Process should be permanently deleted i.e. bypass the trashcan. (default to false)
+     */
+    this.deleteProcess = function (processId, opts) {
+      opts = opts || {};
+      var postBody = null;
+
+      // verify the required parameter 'processId' is set
+      if (processId == undefined || processId == null) {
+        throw "Missing the required parameter 'processId' when calling deleteProcess";
+      }
+
+      var pathParams = {
+        'processId': processId
+      };
+      var queryParams = {
+        'permanent': opts['permanent']
+      };
+      var headerParams = {};
+      var formParams = {};
+
+      var authNames = ['basicAuth'];
+      var contentTypes = ['application/json'];
+      var accepts = ['application/json'];
+      var returnType = null;
+
+      return this.apiClient.callApi('/processes/{processId}', 'DELETE', pathParams, queryParams, headerParams, formParams, postBody, authNames, contentTypes, accepts, returnType);
+    };
+
+    /**
+     * Get a Process
+     * Returns information for Process **processId**.\n\nYou can use the **relations** parameter to include one or more related\nentities in a single response and so reduce network traffic.\n\nThe entity types in Alfresco are organized in a tree structure.\nThe **Processes** entity has two children, **containers** and **members**.\nThe following relations parameter returns all the container and member\nobjects related to the Process **processId**:\n\n&#x60;&#x60;&#x60;\ncontainers,members\n&#x60;&#x60;&#x60;\n
+     * @param {String} processId The identifier of a Process.
+     * @param {Object} opts Optional parameters
+     * @param {Array.<String>} opts.relations Use the relations parameter to include one or more related entities in a single response.
+     * @param {Array.<String>} opts.fields A list of field names.\n\nYou can use this parameter to restrict the fields\nreturned within a response if, for example, you want to save on overall bandwidth.\n\nThe list applies to a returned individual\nentity or entries within a collection.\n\nIf the API method also supports the **include**\nparameter, then the fields specified in the **include**\nparameter are returned in addition to those specified in the **fields** parameter.\n
+     * data is of type: {module:model/ProcessEntry}
+     */
+    this.getProcess = function (processId, opts) {
+      opts = opts || {};
+      var postBody = null;
+
+      // verify the required parameter 'processId' is set
+      if (processId == undefined || processId == null) {
+        throw "Missing the required parameter 'processId' when calling getProcess";
+      }
+
+      var pathParams = {
+        'processId': processId
+      };
+      var queryParams = {
+        'relations': this.apiClient.buildCollectionParam(opts['relations'], 'csv'),
+        'fields': this.apiClient.buildCollectionParam(opts['fields'], 'csv')
+      };
+      var headerParams = {};
+      var formParams = {};
+
+      var authNames = ['basicAuth'];
+      var contentTypes = ['application/json'];
+      var accepts = ['application/json'];
+      var returnType = ProcessEntry;
+
+      return this.apiClient.callApi('/processes/{processId}', 'GET', pathParams, queryParams, headerParams, formParams, postBody, authNames, contentTypes, accepts, returnType);
+    };
+
+    /**
+     * Get Processes
+     * Returns a list of Processes in this repository. You can sort the list of Processes using the **orderBy** parameter.\n**orderBy** specifies the name of one or more\ncomma separated properties.\nFor each property you can optionally specify the order direction.\nBoth of the these **orderBy** examples retrieve Processes ordered by ascending name:\n\n&#x60;&#x60;&#x60;\nname\nname ASC\n&#x60;&#x60;&#x60;\n\nYou can use the **relations** parameter to include one or more related\nentities in a single response and so reduce network traffic.\n\nThe entity types in Alfresco are organized in a tree structure.\nThe **Processes** entity has two children, **containers** and **members**.\nThe following relations parameter returns all the container and member\nobjects related to each Process:\n\n&#x60;&#x60;&#x60;\ncontainers,members\n&#x60;&#x60;&#x60;\n
+     * @param {Object} opts Optional parameters
+     * @param {Integer} opts.skipCount The number of entities that exist in the collection before those included in this list.
+     * @param {Integer} opts.maxItems The maximum number of items to return in the list.
+     * @param {String} opts.orderBy A string to control the order of the entities returned.
+     * @param {Array.<String>} opts.relations Use the relations parameter to include one or more related entities in a single response.
+     * @param {Array.<String>} opts.fields A list of field names.\n\nYou can use this parameter to restrict the fields\nreturned within a response if, for example, you want to save on overall bandwidth.\n\nThe list applies to a returned individual\nentity or entries within a collection.\n\nIf the API method also supports the **include**\nparameter, then the fields specified in the **include**\nparameter are returned in addition to those specified in the **fields** parameter.\n
+     * data is of type: {module:model/ProcessPaging}
+     */
+    this.getProcesses = function (opts) {
+      opts = opts || {};
+      var postBody = null;
+
+      var pathParams = {};
+      var queryParams = {
+        'skipCount': opts['skipCount'],
+        'maxItems': opts['maxItems'],
+        'orderBy': opts['orderBy'],
+        'relations': this.apiClient.buildCollectionParam(opts['relations'], 'csv'),
+        'fields': this.apiClient.buildCollectionParam(opts['fields'], 'csv')
+      };
+      var headerParams = {};
+      var formParams = {};
+
+      var authNames = ['basicAuth'];
+      var contentTypes = ['application/json'];
+      var accepts = ['application/json'];
+      var returnType = ProcessPaging;
+
+      return this.apiClient.callApi('/processes', 'GET', pathParams, queryParams, headerParams, formParams, postBody, authNames, contentTypes, accepts, returnType);
+    };
+
+    /**
+     * Create a Process item
+     * Creates a default Process item with the given details.  Unless explicitly specified, the process id will be generated from the process title. The process id must be unique and only contain alphanumeric and/or dash\ncharacters.\n\nFor example, to create a public process called \&quot;Marketing\&quot; the following body could be used:\n&#x60;&#x60;&#x60;JSON\n{\n  \&quot;title\&quot;: \&quot;Marketing\&quot;,\n  \&quot;visibility\&quot;: \&quot;PUBLIC\&quot;\n}\n&#x60;&#x60;&#x60;\n\nThe creation of the (surf) configuration files required by Share can be skipped via the **skipConfiguration** query parameter.\n\n**Please note: if skipped then such a process will *not* work within Share.**\n\nThe addition of the process to the user&#39;s process favorites can be skipped via the **skipAddToFavorites** query parameter.\n\nThe creator will be added as a member with process Manager role.\n
+     * @param {String} processId The identifier of a Process
+     * @param {module:model/ProcessItemBody} processBody The process details
+     * @param {Object} opts Optional parameters
+     * @param {Boolean} opts.skipConfiguration Flag to indicate whether the Share-specific (surf) configuration files for the process should not be created. (default to false)
+     * @param {Boolean} opts.skipAddToFavorites Flag to indicate whether the process should not be added to the user&#39;s process favorites. (default to false)
+     * data is of type: {module:model/ProcessEntry}
+     */
+    this.createProcessItem = function (processId, processItemBody, opts) {
+      opts = opts || {};
+      var postBody = processItemBody;
+
+      // verify the required parameter 'processId' is set
+      if (processId == undefined || processId == null) {
+        throw "Missing the required parameter 'processId' when calling createProcessItem";
+      }
+
+      // verify the required parameter 'processItemBody' is set
+      if (processItemBody == undefined || processItemBody == null) {
+        throw "Missing the required parameter 'processItemBody' when calling createProcessItem";
+      }
+
+      var pathParams = {
+        'processId': processId
+      };
+      var queryParams = {
+        'skipConfiguration': opts['skipConfiguration'],
+        'skipAddToFavorites': opts['skipAddToFavorites']
+      };
+      var headerParams = {};
+      var formParams = {};
+
+      var authNames = ['basicAuth'];
+      var contentTypes = ['application/json'];
+      var accepts = ['application/json'];
+      var returnType = ProcessItemEntry;
+
+      return this.apiClient.callApi('/processes/{processId}/items', 'POST', pathParams, queryParams, headerParams, formParams, postBody, authNames, contentTypes, accepts, returnType);
+    };
+
+    /**
+     * Delete a Process item
+     * Deletes the Process item with **itemId The identifier of a Process item.
+     * @param {Object} opts Optional parameters
+     * @param {Boolean} opts.permanent Flag to indicate whether the Process should be permanently deleted i.e. bypass the trashcan. (default to false)
+     */
+    this.deleteProcessItem = function (processId, itemId, opts) {
+      opts = opts || {};
+      var postBody = null;
+
+      // verify the required parameter 'processId' is set
+      if (processId == undefined || processId == null) {
+        throw "Missing the required parameter 'processId' when calling deleteProcessItem";
+      }
+      // verify the required parameter 'itemId' is set
+      if (itemId == undefined || itemId == null) {
+        throw "Missing the required parameter 'itemId' when calling deleteProcessItem";
+      }
+
+      var pathParams = {
+        'processId': processId,
+        'itemId': itemId
+      };
+      var queryParams = {
+        'permanent': opts['permanent']
+      };
+      var headerParams = {};
+      var formParams = {};
+
+      var authNames = ['basicAuth'];
+      var contentTypes = ['application/json'];
+      var accepts = ['application/json'];
+      var returnType = null;
+
+      return this.apiClient.callApi('/processes/{processId}/items/{itemId}', 'DELETE', pathParams, queryParams, headerParams, formParams, postBody, authNames, contentTypes, accepts, returnType);
+    };
+
+    /**
+     * Get Process Items
+     * Returns a list of Process items in this repository. You can sort the list of Process items using the **orderBy** parameter.\n**orderBy** specifies the name of one or more\ncomma separated properties.\nFor each property you can optionally specify the order direction.\nBoth of the these **orderBy** examples retrieve Processes ordered by ascending name:\n\n&#x60;&#x60;&#x60;\nname\nname ASC\n&#x60;&#x60;&#x60;\n\nYou can use the **relations** parameter to include one or more related\nentities in a single response and so reduce network traffic.\n\nThe entity types in Alfresco are organized in a tree structure.\nThe **Processes** entity has two children, **containers** and **members**.\nThe following relations parameter returns all the container and member\nobjects related to each Process:\n\n&#x60;&#x60;&#x60;\ncontainers,members\n&#x60;&#x60;&#x60;\n
+     * @param {Object} opts Optional parameters
+     * @param {Integer} opts.skipCount The number of entities that exist in the collection before those included in this list.
+     * @param {Integer} opts.maxItems The maximum number of items to return in the list.
+     * @param {String} opts.orderBy A string to control the order of the entities returned.
+     * @param {Array.<String>} opts.relations Use the relations parameter to include one or more related entities in a single response.
+     * @param {Array.<String>} opts.fields A list of field names.\n\nYou can use this parameter to restrict the fields\nreturned within a response if, for example, you want to save on overall bandwidth.\n\nThe list applies to a returned individual\nentity or entries within a collection.\n\nIf the API method also supports the **include**\nparameter, then the fields specified in the **include**\nparameter are returned in addition to those specified in the **fields** parameter.\n
+     * data is of type: {module:model/ProcessPaging}
+     */
+    this.getProcessItems = function (processId, opts) {
+      opts = opts || {};
+      var postBody = null;
+
+      // verify the required parameter 'processId' is set
+      if (processId == undefined || processId == null) {
+        throw "Missing the required parameter 'processId' when calling getProcessItems";
+      }
+
+      var pathParams = {
+        'processId': processId
+      };
+      var queryParams = {
+        'skipCount': opts['skipCount'],
+        'maxItems': opts['maxItems'],
+        'orderBy': opts['orderBy'],
+        'relations': this.apiClient.buildCollectionParam(opts['relations'], 'csv'),
+        'fields': this.apiClient.buildCollectionParam(opts['fields'], 'csv')
+      };
+      var headerParams = {};
+      var formParams = {};
+
+      var authNames = ['basicAuth'];
+      var contentTypes = ['application/json'];
+      var accepts = ['application/json'];
+      var returnType = ProcessItemsPaging;
+
+      return this.apiClient.callApi('/processes/{processId}/items', 'GET', pathParams, queryParams, headerParams, formParams, postBody, authNames, contentTypes, accepts, returnType);
+    };
+
+    /**
+     * Add a process variable
+     * Creates one or more comments on node **nodeId**. You can create more than one comment by \nspecifying a list of comments in the JSON body like this:      \n\n&#x60;&#x60;&#x60;JSON\n[\n  {\n    \&quot;content\&quot;: \&quot;This is a comment\&quot;\n  },\n  {\n    \&quot;content\&quot;: \&quot;This is another comment\&quot;\n  }\n]\n&#x60;&#x60;&#x60;\n
+     * @param {String} processId The identifier of a process.
+     * @param {module:model/VariableBody} variableBody The variable details
+     * data is of type: {module:model/VariableEntry}
+     */
+    this.addProcessVariable = function (processId, variableBody) {
+      var postBody = variableBody;
+
+      // verify the required parameter 'processId' is set
+      if (processId == undefined || processId == null) {
+        throw "Missing the required parameter 'processId' when calling addProcessVariable";
+      }
+
+      // verify the required parameter 'variableBody' is set
+      if (variableBody == undefined || variableBody == null) {
+        throw "Missing the required parameter 'variableBody' when calling addProcessVariable";
+      }
+
+      var pathParams = {
+        'processId': processId
+      };
+      var queryParams = {};
+      var headerParams = {};
+      var formParams = {};
+
+      var authNames = ['basicAuth'];
+      var contentTypes = ['application/json'];
+      var accepts = ['application/json'];
+      var returnType = VariableEntry;
+
+      return this.apiClient.callApi('/processes/{processId}/variables', 'POST', pathParams, queryParams, headerParams, formParams, postBody, authNames, contentTypes, accepts, returnType);
+    };
+
+    /**
+     * Get process variables
+     * Returns a list of variables for the process identified by **processId**, sorted chronologically with the newest variable first.
+     * @param {String} processId The identifier of a process.
+     * @param {Object} opts Optional parameters
+     * @param {Integer} opts.skipCount The number of entities that exist in the collection before those included in this list.
+     * @param {Integer} opts.maxItems The maximum number of items to return in the list.
+     * @param {Array.<String>} opts.fields A list of field names.\n\nYou can use this parameter to restrict the fields\nreturned within a response if, for example, you want to save on overall bandwidth.\n\nThe list applies to a returned individual\nentity or entries within a collection.\n\nIf the API method also supports the **include**\nparameter, then the fields specified in the **include**\nparameter are returned in addition to those specified in the **fields** parameter.\n
+     * data is of type: {module:model/VariablePaging}
+     */
+    this.getProcessVariables = function (processId, opts) {
+      opts = opts || {};
+      var postBody = null;
+
+      // verify the required parameter 'processId' is set
+      if (processId == undefined || processId == null) {
+        throw "Missing the required parameter 'processId' when calling getProcessVariables";
+      }
+
+      var pathParams = {
+        'processId': processId
+      };
+      var queryParams = {
+        'skipCount': opts['skipCount'],
+        'maxItems': opts['maxItems'],
+        'fields': this.apiClient.buildCollectionParam(opts['fields'], 'csv')
+      };
+      var headerParams = {};
+      var formParams = {};
+
+      var authNames = ['basicAuth'];
+      var contentTypes = ['application/json'];
+      var accepts = ['application/json'];
+      var returnType = VariablePaging;
+
+      return this.apiClient.callApi('/processes/{processId}/variables', 'GET', pathParams, queryParams, headerParams, formParams, postBody, authNames, contentTypes, accepts, returnType);
+    };
+
+    /**
+     * Delete a process variable
+     * Removes the variable **variableName** from process **processId**.
+     * @param {String} processId The identifier of a process.
+     * @param {String} variableName The name of the variable.
+     */
+    this.removeProcessVariable = function (processId, variableName) {
+      var postBody = null;
+
+      // verify the required parameter 'processId' is set
+      if (processId == undefined || processId == null) {
+        throw "Missing the required parameter 'processId' when calling removeProcessVariable";
+      }
+
+      // verify the required parameter 'variableName' is set
+      if (variableName == undefined || variableName == null) {
+        throw "Missing the required parameter 'variableName' when calling removeProcessVariable";
+      }
+
+      var pathParams = {
+        'processId': processId,
+        'variableName': variableName
+      };
+      var queryParams = {};
+      var headerParams = {};
+      var formParams = {};
+
+      var authNames = ['basicAuth'];
+      var contentTypes = ['application/json'];
+      var accepts = ['application/json'];
+      var returnType = null;
+
+      return this.apiClient.callApi('/processes/{processId}/variables/{variableName}', 'DELETE', pathParams, queryParams, headerParams, formParams, postBody, authNames, contentTypes, accepts, returnType);
+    };
+
+    /**
+     * Update a Process variable
+     * Updates a Process variable with the given details.  Unless explicitly specified, the process id will be generated from the process title. The process id must be unique and only contain alphanumeric and/or dash\ncharacters.\n\nFor example, to create a public process called \&quot;Marketing\&quot; the following body could be used:\n&#x60;&#x60;&#x60;JSON\n{\n  \&quot;title\&quot;: \&quot;Marketing\&quot;,\n  \&quot;visibility\&quot;: \&quot;PUBLIC\&quot;\n}\n&#x60;&#x60;&#x60;\n\nThe creation of the (surf) configuration files required by Share can be skipped via the **skipConfiguration** query parameter.\n\n**Please note: if skipped then such a process will *not* work within Share.**\n\nThe addition of the process to the user&#39;s process favorites can be skipped via the **skipAddToFavorites** query parameter.\n\nThe creator will be added as a member with process Manager role.\n
+     * @param {String} processId The identifier of a process.
+     * @param {String} variableName The name of the variable.
+     * @param {module:model/VariableBody} variableBody The variable details
+     * @param {Object} opts Optional parameters
+     * @param {Boolean} opts.skipConfiguration Flag to indicate whether the Share-specific (surf) configuration files for the process should not be created. (default to false)
+     * @param {Boolean} opts.skipAddToFavorites Flag to indicate whether the process should not be added to the user&#39;s process favorites. (default to false)
+     * data is of type: {module:model/ProcessEntry}
+     */
+    this.updateProcessVariable = function (processId, variableName, variableBody, opts) {
+      opts = opts || {};
+      var postBody = variableBody;
+
+      // verify the required parameter 'processId' is set
+      if (processId == undefined || processId == null) {
+        throw "Missing the required parameter 'processId' when calling updateProcessVariable";
+      }
+      // verify the required parameter 'variableName' is set
+      if (variableName == undefined || variableName == null) {
+        throw "Missing the required parameter 'variableName' when calling updateProcessVariable";
+      }
+
+      // verify the required parameter 'variableBody' is set
+      if (variableBody == undefined || variableBody == null) {
+        throw "Missing the required parameter 'variableBody' when calling updateProcessVariable";
+      }
+
+      var pathParams = {
+        'processId': processId,
+        'variableName': variableName
+      };
+      var queryParams = {
+        'skipConfiguration': opts['skipConfiguration'],
+        'skipAddToFavorites': opts['skipAddToFavorites']
+      };
+      var headerParams = {};
+      var formParams = {};
+
+      var authNames = ['basicAuth'];
+      var contentTypes = ['application/json'];
+      var accepts = ['application/json'];
+      var returnType = VariableEntry;
+
+      return this.apiClient.callApi('/processes/{processId}/variables/{variableName}', 'PUT', pathParams, queryParams, headerParams, formParams, postBody, authNames, contentTypes, accepts, returnType);
+    };
+
+    /**
+     * Get process tasks
+     * Returns a list of Tasks in this repository for a specified process. You can sort the list of Tasks using the **orderBy** parameter.\n**orderBy** specifies the name of one or more\ncomma separated properties.\nFor each property you can optionally specify the order direction.\nBoth of the these **orderBy** examples retrieve Tasks ordered by ascending name:\n\n&#x60;&#x60;&#x60;\nname\nname ASC\n&#x60;&#x60;&#x60;\n\nYou can use the **relations** parameter to include one or more related\nentities in a single response and so reduce network traffic.\n\nThe entity types in Alfresco are organized in a tree structure.\nThe **Tasks** entity has two children, **containers** and **members**.\nThe following relations parameter returns all the container and member\nobjects related to each Task:\n\n&#x60;&#x60;&#x60;\ncontainers,members\n&#x60;&#x60;&#x60;\n
+     * @param {String} processId The identifier of a process.
+     * @param {Object} opts Optional parameters
+     * @param {Integer} opts.skipCount The number of entities that exist in the collection before those included in this list.
+     * @param {Integer} opts.maxItems The maximum number of items to return in the list.
+     * @param {String} opts.orderBy A string to control the order of the entities returned.
+     * @param {Array.<String>} opts.relations Use the relations parameter to include one or more related entities in a single response.
+     * @param {Array.<String>} opts.fields A list of field names.\n\nYou can use this parameter to restrict the fields\nreturned within a response if, for example, you want to save on overall bandwidth.\n\nThe list applies to a returned individual\nentity or entries within a collection.\n\nIf the API method also supports the **include**\nparameter, then the fields specified in the **include**\nparameter are returned in addition to those specified in the **fields** parameter.\n
+     * data is of type: {module:model/TaskPaging}
+     */
+    this.getProcessTasks = function (processId, opts) {
+      opts = opts || {};
+      var postBody = null;
+
+      // verify the required parameter 'processId' is set
+      if (processId == undefined || processId == null) {
+        throw "Missing the required parameter 'processId' when calling getProcessTasks";
+      }
+
+      var pathParams = {
+        'processId': processId
+      };
+      var queryParams = {
+        'skipCount': opts['skipCount'],
+        'maxItems': opts['maxItems'],
+        'orderBy': opts['orderBy'],
+        'relations': this.apiClient.buildCollectionParam(opts['relations'], 'csv'),
+        'fields': this.apiClient.buildCollectionParam(opts['fields'], 'csv')
+      };
+      var headerParams = {};
+      var formParams = {};
+
+      var authNames = ['basicAuth'];
+      var contentTypes = ['application/json'];
+      var accepts = ['application/json'];
+      var returnType = TaskPaging;
+
+      return this.apiClient.callApi('/processes/{processId}/tasks', 'GET', pathParams, queryParams, headerParams, formParams, postBody, authNames, contentTypes, accepts, returnType);
+    };
+  };
+
+  return exports;
+});
+
+},{"../../../alfrescoApiClient":330,"../model/Error":297,"../model/ProcessEntry":308,"../model/ProcessPaging":314,"../model/TaskPaging":321}],289:[function(require,module,exports){
+'use strict';
+
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
+
+(function (root, factory) {
+  if (typeof define === 'function' && define.amd) {
+    // AMD. Register as an anonymous module.
+    define(['../../../alfrescoApiClient', '../model/Error', '../model/TaskEntry', '../model/TaskPaging'], factory);
+  } else if ((typeof module === 'undefined' ? 'undefined' : _typeof(module)) === 'object' && module.exports) {
+    // CommonJS-like environments that support module.exports, like Node.
+    module.exports = factory(require('../../../alfrescoApiClient'), require('../model/Error'), require('../model/TaskEntry'), require('../model/TaskPaging'));
+  } else {
+    // Browser globals (root is window)
+    if (!root.AlfrescoWorkflowRestApi) {
+      root.AlfrescoWorkflowRestApi = {};
+    }
+    root.AlfrescoWorkflowRestApi.TasksApi = factory(root.AlfrescoWorkflowRestApi.ApiClient, root.AlfrescoWorkflowRestApi.Error, root.AlfrescoWorkflowRestApi.TaskEntry, root.AlfrescoWorkflowRestApi.TaskPaging);
+  }
+})(undefined, function (ApiClient, Error, TaskEntry, TaskPaging) {
+  'use strict';
+
+  /**
+   * Tasks service.
+   * @module api/TasksApi
+   * @version 0.1.0
+   */
+
+  /**
+   * Constructs a new TasksApi. 
+   * @alias module:api/TasksApi
+   * @class
+   * @param {module:ApiClient} apiClient Optional API client implementation to use, default to {@link module:ApiClient#instance}
+   * if unspecified.
+   */
+
+  var exports = function exports(apiClient) {
+    this.apiClient = apiClient || ApiClient.instance;
+
+    /**
+     * Update a task
+     * Updates a task with the given details.  Unless explicitly specified, the task id will be generated from the task title. The task id must be unique and only contain alphanumeric and/or dash\ncharacters.\n\nFor example, to create a public task called \&quot;Marketing\&quot; the following body could be used:\n&#x60;&#x60;&#x60;JSON\n{\n  \&quot;title\&quot;: \&quot;Marketing\&quot;,\n  \&quot;visibility\&quot;: \&quot;PUBLIC\&quot;\n}\n&#x60;&#x60;&#x60;\n\nThe creation of the (surf) configuration files required by Share can be skipped via the **skipConfiguration** query parameter.\n\n**Please note: if skipped then such a task will *not* work within Share.**\n\nThe addition of the task to the user&#39;s task favorites can be skipped via the **skipAddToFavorites** query parameter.\n\nThe creator will be added as a member with task Manager role.\n
+     * @param {String} taskId The identifier of a Task.
+     * @param {module:model/TaskBody} taskBody The task details
+     * @param {Object} opts Optional parameters
+     * @param {Boolean} opts.skipConfiguration Flag to indicate whether the Share-specific (surf) configuration files for the task should not be created. (default to false)
+     * @param {Boolean} opts.skipAddToFavorites Flag to indicate whether the task should not be added to the user&#39;s task favorites. (default to false)
+     * data is of type: {module:model/TaskEntry}
+     */
+    this.updateTask = function (taskId, taskBody, opts) {
+      opts = opts || {};
+      var postBody = taskBody;
+
+      // verify the required parameter 'taskId' is set
+      if (taskId == undefined || taskId == null) {
+        throw "Missing the required parameter 'taskId' when calling updateTask";
+      }
+
+      // verify the required parameter 'taskBody' is set
+      if (taskBody == undefined || taskBody == null) {
+        throw "Missing the required parameter 'taskBody' when calling updateTask";
+      }
+
+      var pathParams = {
+        'taskId': taskId
+      };
+      var queryParams = {
+        'skipConfiguration': opts['skipConfiguration'],
+        'skipAddToFavorites': opts['skipAddToFavorites']
+      };
+      var headerParams = {};
+      var formParams = {};
+
+      var authNames = ['basicAuth'];
+      var contentTypes = ['application/json'];
+      var accepts = ['application/json'];
+      var returnType = TaskEntry;
+
+      return this.apiClient.callApi('/tasks/{taskId}', 'PUT', pathParams, queryParams, headerParams, formParams, postBody, authNames, contentTypes, accepts, returnType);
+    };
+
+    /**
+     * Get a Task
+     * Returns information for Task **taskId**.\n\nYou can use the **relations** parameter to include one or more related\nentities in a single response and so reduce network traffic.\n\nThe entity types in Alfresco are organized in a tree structure.\nThe **Tasks** entity has two children, **containers** and **members**.\nThe following relations parameter returns all the container and member\nobjects related to the Task **taskId**:\n\n&#x60;&#x60;&#x60;\ncontainers,members\n&#x60;&#x60;&#x60;\n
+     * @param {String} taskId The identifier of a Task.
+     * @param {Object} opts Optional parameters
+     * @param {Array.<String>} opts.relations Use the relations parameter to include one or more related entities in a single response.
+     * @param {Array.<String>} opts.fields A list of field names.\n\nYou can use this parameter to restrict the fields\nreturned within a response if, for example, you want to save on overall bandwidth.\n\nThe list applies to a returned individual\nentity or entries within a collection.\n\nIf the API method also supports the **include**\nparameter, then the fields specified in the **include**\nparameter are returned in addition to those specified in the **fields** parameter.\n
+     * data is of type: {module:model/TaskEntry}
+     */
+    this.getTask = function (taskId, opts) {
+      opts = opts || {};
+      var postBody = null;
+
+      // verify the required parameter 'taskId' is set
+      if (taskId == undefined || taskId == null) {
+        throw "Missing the required parameter 'taskId' when calling getTask";
+      }
+
+      var pathParams = {
+        'taskId': taskId
+      };
+      var queryParams = {
+        'relations': this.apiClient.buildCollectionParam(opts['relations'], 'csv'),
+        'fields': this.apiClient.buildCollectionParam(opts['fields'], 'csv')
+      };
+      var headerParams = {};
+      var formParams = {};
+
+      var authNames = ['basicAuth'];
+      var contentTypes = ['application/json'];
+      var accepts = ['application/json'];
+      var returnType = TaskEntry;
+
+      return this.apiClient.callApi('/tasks/{taskId}', 'GET', pathParams, queryParams, headerParams, formParams, postBody, authNames, contentTypes, accepts, returnType);
+    };
+
+    /**
+     * Get Tasks
+     * Returns a list of Tasks in this repository. You can sort the list of Tasks using the **orderBy** parameter.\n**orderBy** specifies the name of one or more\ncomma separated properties.\nFor each property you can optionally specify the order direction.\nBoth of the these **orderBy** examples retrieve Tasks ordered by ascending name:\n\n&#x60;&#x60;&#x60;\nname\nname ASC\n&#x60;&#x60;&#x60;\n\nYou can use the **relations** parameter to include one or more related\nentities in a single response and so reduce network traffic.\n\nThe entity types in Alfresco are organized in a tree structure.\nThe **Tasks** entity has two children, **containers** and **members**.\nThe following relations parameter returns all the container and member\nobjects related to each Task:\n\n&#x60;&#x60;&#x60;\ncontainers,members\n&#x60;&#x60;&#x60;\n
+     * @param {Object} opts Optional parameters
+     * @param {Integer} opts.skipCount The number of entities that exist in the collection before those included in this list.
+     * @param {Integer} opts.maxItems The maximum number of items to return in the list.
+     * @param {String} opts.orderBy A string to control the order of the entities returned.
+     * @param {Array.<String>} opts.relations Use the relations parameter to include one or more related entities in a single response.
+     * @param {Array.<String>} opts.fields A list of field names.\n\nYou can use this parameter to restrict the fields\nreturned within a response if, for example, you want to save on overall bandwidth.\n\nThe list applies to a returned individual\nentity or entries within a collection.\n\nIf the API method also supports the **include**\nparameter, then the fields specified in the **include**\nparameter are returned in addition to those specified in the **fields** parameter.\n
+     * data is of type: {module:model/TaskPaging}
+     */
+    this.getTasks = function (opts) {
+      opts = opts || {};
+      var postBody = null;
+
+      var pathParams = {};
+      var queryParams = {
+        'skipCount': opts['skipCount'],
+        'maxItems': opts['maxItems'],
+        'orderBy': opts['orderBy'],
+        'relations': this.apiClient.buildCollectionParam(opts['relations'], 'csv'),
+        'fields': this.apiClient.buildCollectionParam(opts['fields'], 'csv')
+      };
+      var headerParams = {};
+      var formParams = {};
+
+      var authNames = ['basicAuth'];
+      var contentTypes = ['application/json'];
+      var accepts = ['application/json'];
+      var returnType = TaskPaging;
+
+      return this.apiClient.callApi('/tasks', 'GET', pathParams, queryParams, headerParams, formParams, postBody, authNames, contentTypes, accepts, returnType);
+    };
+
+    /**
+     * Get task candidates
+     * Returns a list of candidates in this repository. You can sort the list of candidates using the **orderBy** parameter.\n**orderBy** specifies the name of one or more\ncomma separated properties.\nFor each property you can optionally specify the order direction.\nBoth of the these **orderBy** examples retrieve candidates ordered by ascending name:\n\n&#x60;&#x60;&#x60;\nname\nname ASC\n&#x60;&#x60;&#x60;\n\nYou can use the **relations** parameter to include one or more related\nentities in a single response and so reduce network traffic.\n\nThe entity types in Alfresco are organized in a tree structure.\nThe **Candidate** entity has two children, **containers** and **members**.\nThe following relations parameter returns all the container and member\nobjects related to each Task:\n\n&#x60;&#x60;&#x60;\ncontainers,members\n&#x60;&#x60;&#x60;\n
+     * @param {String} taskId The identifier of a Task.
+     * @param {Object} opts Optional parameters
+     * @param {Integer} opts.skipCount The number of entities that exist in the collection before those included in this list.
+     * @param {Integer} opts.maxItems The maximum number of items to return in the list.
+     * @param {String} opts.orderBy A string to control the order of the entities returned.
+     * @param {Array.<String>} opts.relations Use the relations parameter to include one or more related entities in a single response.
+     * @param {Array.<String>} opts.fields A list of field names.\n\nYou can use this parameter to restrict the fields\nreturned within a response if, for example, you want to save on overall bandwidth.\n\nThe list applies to a returned individual\nentity or entries within a collection.\n\nIf the API method also supports the **include**\nparameter, then the fields specified in the **include**\nparameter are returned in addition to those specified in the **fields** parameter.\n
+     * data is of type: {module:model/CandidatePaging}
+     */
+    this.getCandidates = function (taskId, opts) {
+      opts = opts || {};
+      var postBody = null;
+
+      // verify the required parameter 'taskId' is set
+      if (taskId == undefined || taskId == null) {
+        throw "Missing the required parameter 'taskId' when calling getCandidates";
+      }
+
+      var pathParams = {
+        'taskId': taskId
+      };
+      var queryParams = {
+        'skipCount': opts['skipCount'],
+        'maxItems': opts['maxItems'],
+        'orderBy': opts['orderBy'],
+        'relations': this.apiClient.buildCollectionParam(opts['relations'], 'csv'),
+        'fields': this.apiClient.buildCollectionParam(opts['fields'], 'csv')
+      };
+      var headerParams = {};
+      var formParams = {};
+
+      var authNames = ['basicAuth'];
+      var contentTypes = ['application/json'];
+      var accepts = ['application/json'];
+      var returnType = CandidatePaging;
+
+      return this.apiClient.callApi('/tasks/{taskId}/candidates', 'GET', pathParams, queryParams, headerParams, formParams, postBody, authNames, contentTypes, accepts, returnType);
+    };
+
+    /**
+     * Create a Task item
+     * Creates a default Task item with the given details.  Unless explicitly specified, the task id will be generated from the task title. The task id must be unique and only contain alphanumeric and/or dash\ncharacters.\n\nFor example, to create a public task called \&quot;Marketing\&quot; the following body could be used:\n&#x60;&#x60;&#x60;JSON\n{\n  \&quot;title\&quot;: \&quot;Marketing\&quot;,\n  \&quot;visibility\&quot;: \&quot;PUBLIC\&quot;\n}\n&#x60;&#x60;&#x60;\n\nThe creation of the (surf) configuration files required by Share can be skipped via the **skipConfiguration** query parameter.\n\n**Please note: if skipped then such a task will *not* work within Share.**\n\nThe addition of the task to the user&#39;s task favorites can be skipped via the **skipAddToFavorites** query parameter.\n\nThe creator will be added as a member with task Manager role.\n
+     * @param {String} taskId The identifier of a Task
+     * @param {module:model/TaskItemBody} taskBody The task details
+     * @param {Object} opts Optional parameters
+     * @param {Boolean} opts.skipConfiguration Flag to indicate whether the Share-specific (surf) configuration files for the task should not be created. (default to false)
+     * @param {Boolean} opts.skipAddToFavorites Flag to indicate whether the task should not be added to the user&#39;s task favorites. (default to false)
+     * data is of type: {module:model/TaskEntry}
+     */
+    this.createTaskItem = function (taskId, taskItemBody, opts) {
+      opts = opts || {};
+      var postBody = taskItemBody;
+
+      // verify the required parameter 'taskId' is set
+      if (taskId == undefined || taskId == null) {
+        throw "Missing the required parameter 'taskId' when calling createTaskItem";
+      }
+
+      // verify the required parameter 'taskItemBody' is set
+      if (taskItemBody == undefined || taskItemBody == null) {
+        throw "Missing the required parameter 'taskItemBody' when calling createTaskItem";
+      }
+
+      var pathParams = {
+        'taskId': taskId
+      };
+      var queryParams = {
+        'skipConfiguration': opts['skipConfiguration'],
+        'skipAddToFavorites': opts['skipAddToFavorites']
+      };
+      var headerParams = {};
+      var formParams = {};
+
+      var authNames = ['basicAuth'];
+      var contentTypes = ['application/json'];
+      var accepts = ['application/json'];
+      var returnType = TaskItemEntry;
+
+      return this.apiClient.callApi('/tasks/{taskId}/items', 'POST', pathParams, queryParams, headerParams, formParams, postBody, authNames, contentTypes, accepts, returnType);
+    };
+
+    /**
+     * Delete a Task item
+     * Deletes the Task item with **itemId The identifier of a Task item.
+     * @param {Object} opts Optional parameters
+     * @param {Boolean} opts.permanent Flag to indicate whether the Task should be permanently deleted i.e. bypass the trashcan. (default to false)
+     */
+    this.deleteTaskItem = function (taskId, itemId, opts) {
+      opts = opts || {};
+      var postBody = null;
+
+      // verify the required parameter 'taskId' is set
+      if (taskId == undefined || taskId == null) {
+        throw "Missing the required parameter 'taskId' when calling deleteTaskItem";
+      }
+      // verify the required parameter 'itemId' is set
+      if (itemId == undefined || itemId == null) {
+        throw "Missing the required parameter 'itemId' when calling deleteTaskItem";
+      }
+
+      var pathParams = {
+        'taskId': taskId,
+        'itemId': itemId
+      };
+      var queryParams = {
+        'permanent': opts['permanent']
+      };
+      var headerParams = {};
+      var formParams = {};
+
+      var authNames = ['basicAuth'];
+      var contentTypes = ['application/json'];
+      var accepts = ['application/json'];
+      var returnType = null;
+
+      return this.apiClient.callApi('/tasks/{taskId}/items/{itemId}', 'DELETE', pathParams, queryParams, headerParams, formParams, postBody, authNames, contentTypes, accepts, returnType);
+    };
+
+    /**
+     * Get Task Items
+     * Returns a list of Task items in this repository. You can sort the list of Task items using the **orderBy** parameter.\n**orderBy** specifies the name of one or more\ncomma separated properties.\nFor each property you can optionally specify the order direction.\nBoth of the these **orderBy** examples retrieve Tasks ordered by ascending name:\n\n&#x60;&#x60;&#x60;\nname\nname ASC\n&#x60;&#x60;&#x60;\n\nYou can use the **relations** parameter to include one or more related\nentities in a single response and so reduce network traffic.\n\nThe entity types in Alfresco are organized in a tree structure.\nThe **Tasks** entity has two children, **containers** and **members**.\nThe following relations parameter returns all the container and member\nobjects related to each Task:\n\n&#x60;&#x60;&#x60;\ncontainers,members\n&#x60;&#x60;&#x60;\n
+     * @param {Object} opts Optional parameters
+     * @param {Integer} opts.skipCount The number of entities that exist in the collection before those included in this list.
+     * @param {Integer} opts.maxItems The maximum number of items to return in the list.
+     * @param {String} opts.orderBy A string to control the order of the entities returned.
+     * @param {Array.<String>} opts.relations Use the relations parameter to include one or more related entities in a single response.
+     * @param {Array.<String>} opts.fields A list of field names.\n\nYou can use this parameter to restrict the fields\nreturned within a response if, for example, you want to save on overall bandwidth.\n\nThe list applies to a returned individual\nentity or entries within a collection.\n\nIf the API method also supports the **include**\nparameter, then the fields specified in the **include**\nparameter are returned in addition to those specified in the **fields** parameter.\n
+     * data is of type: {module:model/TaskPaging}
+     */
+    this.getTaskItems = function (taskId, opts) {
+      opts = opts || {};
+      var postBody = null;
+
+      // verify the required parameter 'taskId' is set
+      if (taskId == undefined || taskId == null) {
+        throw "Missing the required parameter 'taskId' when calling getTaskItems";
+      }
+
+      var pathParams = {
+        'taskId': taskId
+      };
+      var queryParams = {
+        'skipCount': opts['skipCount'],
+        'maxItems': opts['maxItems'],
+        'orderBy': opts['orderBy'],
+        'relations': this.apiClient.buildCollectionParam(opts['relations'], 'csv'),
+        'fields': this.apiClient.buildCollectionParam(opts['fields'], 'csv')
+      };
+      var headerParams = {};
+      var formParams = {};
+
+      var authNames = ['basicAuth'];
+      var contentTypes = ['application/json'];
+      var accepts = ['application/json'];
+      var returnType = TaskItemsPaging;
+
+      return this.apiClient.callApi('/tasks/{taskId}/items', 'GET', pathParams, queryParams, headerParams, formParams, postBody, authNames, contentTypes, accepts, returnType);
+    };
+
+    /**
+     * Get Task Forms
+     * Returns a list of Task forms in this repository. You can sort the list of Task forms using the **orderBy** parameter.\n**orderBy** specifies the name of one or more\ncomma separated properties.\nFor each property you can optionally specify the order direction.\nBoth of the these **orderBy** examples retrieve Tasks ordered by ascending name:\n\n&#x60;&#x60;&#x60;\nname\nname ASC\n&#x60;&#x60;&#x60;\n\nYou can use the **relations** parameter to include one or more related\nentities in a single response and so reduce network traffic.\n\nThe entity types in Alfresco are organized in a tree structure.\nThe **Tasks** entity has two children, **containers** and **members**.\nThe following relations parameter returns all the container and member\nobjects related to each Task:\n\n&#x60;&#x60;&#x60;\ncontainers,members\n&#x60;&#x60;&#x60;\n
+     * @param {Object} opts Optional parameters
+     * @param {Integer} opts.skipCount The number of entities that exist in the collection before those included in this list.
+     * @param {Integer} opts.maxItems The maximum number of items to return in the list.
+     * @param {String} opts.orderBy A string to control the order of the entities returned.
+     * @param {Array.<String>} opts.relations Use the relations parameter to include one or more related entities in a single response.
+     * @param {Array.<String>} opts.fields A list of field names.\n\nYou can use this parameter to restrict the fields\nreturned within a response if, for example, you want to save on overall bandwidth.\n\nThe list applies to a returned individual\nentity or entries within a collection.\n\nIf the API method also supports the **include**\nparameter, then the fields specified in the **include**\nparameter are returned in addition to those specified in the **fields** parameter.\n
+     * data is of type: {module:model/TaskFormsPaging}
+     */
+    this.getTaskForms = function (taskId, opts) {
+      opts = opts || {};
+      var postBody = null;
+
+      // verify the required parameter 'taskId' is set
+      if (taskId == undefined || taskId == null) {
+        throw "Missing the required parameter 'taskId' when calling getTaskForms";
+      }
+
+      var pathParams = {
+        'taskId': taskId
+      };
+      var queryParams = {
+        'skipCount': opts['skipCount'],
+        'maxItems': opts['maxItems'],
+        'orderBy': opts['orderBy'],
+        'relations': this.apiClient.buildCollectionParam(opts['relations'], 'csv'),
+        'fields': this.apiClient.buildCollectionParam(opts['fields'], 'csv')
+      };
+      var headerParams = {};
+      var formParams = {};
+
+      var authNames = ['basicAuth'];
+      var contentTypes = ['application/json'];
+      var accepts = ['application/json'];
+      var returnType = TaskFormsPaging;
+
+      return this.apiClient.callApi('/tasks/{taskId}/task-form-model', 'GET', pathParams, queryParams, headerParams, formParams, postBody, authNames, contentTypes, accepts, returnType);
+    };
+
+    /**
+     * Add a task variable
+     * Creates one or more comments on node **nodeId**. You can create more than one comment by \nspecifying a list of comments in the JSON body like this:      \n\n&#x60;&#x60;&#x60;JSON\n[\n  {\n    \&quot;content\&quot;: \&quot;This is a comment\&quot;\n  },\n  {\n    \&quot;content\&quot;: \&quot;This is another comment\&quot;\n  }\n]\n&#x60;&#x60;&#x60;\n
+     * @param {String} taskId The identifier of a task.
+     * @param {module:model/VariableBody} variableBody The variable details
+     * data is of type: {module:model/VariableEntry}
+     */
+    this.addTaskVariable = function (taskId, variableBody) {
+      var postBody = variableBody;
+
+      // verify the required parameter 'taskId' is set
+      if (taskId == undefined || taskId == null) {
+        throw "Missing the required parameter 'taskId' when calling addTaskVariable";
+      }
+
+      // verify the required parameter 'variableBody' is set
+      if (variableBody == undefined || variableBody == null) {
+        throw "Missing the required parameter 'variableBody' when calling addTaskVariable";
+      }
+
+      var pathParams = {
+        'taskId': taskId
+      };
+      var queryParams = {};
+      var headerParams = {};
+      var formParams = {};
+
+      var authNames = ['basicAuth'];
+      var contentTypes = ['application/json'];
+      var accepts = ['application/json'];
+      var returnType = VariableEntry;
+
+      return this.apiClient.callApi('/tasks/{taskId}/variables', 'POST', pathParams, queryParams, headerParams, formParams, postBody, authNames, contentTypes, accepts, returnType);
+    };
+
+    /**
+     * Get task variables
+     * Returns a list of variables for the task identified by **taskId**, sorted chronologically with the newest variable first.
+     * @param {String} taskId The identifier of a task.
+     * @param {Object} opts Optional parameters
+     * @param {Integer} opts.skipCount The number of entities that exist in the collection before those included in this list.
+     * @param {Integer} opts.maxItems The maximum number of items to return in the list.
+     * @param {Array.<String>} opts.fields A list of field names.\n\nYou can use this parameter to restrict the fields\nreturned within a response if, for example, you want to save on overall bandwidth.\n\nThe list applies to a returned individual\nentity or entries within a collection.\n\nIf the API method also supports the **include**\nparameter, then the fields specified in the **include**\nparameter are returned in addition to those specified in the **fields** parameter.\n
+     * data is of type: {module:model/VariablePaging}
+     */
+    this.getTaskVariables = function (taskId, opts) {
+      opts = opts || {};
+      var postBody = null;
+
+      // verify the required parameter 'taskId' is set
+      if (taskId == undefined || taskId == null) {
+        throw "Missing the required parameter 'taskId' when calling getTaskVariables";
+      }
+
+      var pathParams = {
+        'taskId': taskId
+      };
+      var queryParams = {
+        'skipCount': opts['skipCount'],
+        'maxItems': opts['maxItems'],
+        'fields': this.apiClient.buildCollectionParam(opts['fields'], 'csv')
+      };
+      var headerParams = {};
+      var formParams = {};
+
+      var authNames = ['basicAuth'];
+      var contentTypes = ['application/json'];
+      var accepts = ['application/json'];
+      var returnType = VariablePaging;
+
+      return this.apiClient.callApi('/tasks/{taskId}/variables', 'GET', pathParams, queryParams, headerParams, formParams, postBody, authNames, contentTypes, accepts, returnType);
+    };
+
+    /**
+     * Delete a task variable
+     * Removes the variable **variableName** from task **taskId**.
+     * @param {String} taskId The identifier of a task.
+     * @param {String} variableName The name of the variable.
+     */
+    this.removeTaskVariable = function (taskId, variableName) {
+      var postBody = null;
+
+      // verify the required parameter 'taskId' is set
+      if (taskId == undefined || taskId == null) {
+        throw "Missing the required parameter 'taskId' when calling removeTaskVariable";
+      }
+
+      // verify the required parameter 'variableName' is set
+      if (variableName == undefined || variableName == null) {
+        throw "Missing the required parameter 'variableName' when calling removeTaskVariable";
+      }
+
+      var pathParams = {
+        'taskId': taskId,
+        'variableName': variableName
+      };
+      var queryParams = {};
+      var headerParams = {};
+      var formParams = {};
+
+      var authNames = ['basicAuth'];
+      var contentTypes = ['application/json'];
+      var accepts = ['application/json'];
+      var returnType = null;
+
+      return this.apiClient.callApi('/tasks/{taskId}/variables/{variableName}', 'DELETE', pathParams, queryParams, headerParams, formParams, postBody, authNames, contentTypes, accepts, returnType);
+    };
+
+    /**
+     * Update a Task variable
+     * Updates a Task variable with the given details.  Unless explicitly specified, the task id will be generated from the task title. The task id must be unique and only contain alphanumeric and/or dash\ncharacters.\n\nFor example, to create a public task called \&quot;Marketing\&quot; the following body could be used:\n&#x60;&#x60;&#x60;JSON\n{\n  \&quot;title\&quot;: \&quot;Marketing\&quot;,\n  \&quot;visibility\&quot;: \&quot;PUBLIC\&quot;\n}\n&#x60;&#x60;&#x60;\n\nThe creation of the (surf) configuration files required by Share can be skipped via the **skipConfiguration** query parameter.\n\n**Please note: if skipped then such a task will *not* work within Share.**\n\nThe addition of the task to the user&#39;s task favorites can be skipped via the **skipAddToFavorites** query parameter.\n\nThe creator will be added as a member with task Manager role.\n
+     * @param {String} taskId The identifier of a task.
+     * @param {String} variableName The name of the variable.
+     * @param {module:model/VariableBody} variableBody The variable details
+     * @param {Object} opts Optional parameters
+     * @param {Boolean} opts.skipConfiguration Flag to indicate whether the Share-specific (surf) configuration files for the task should not be created. (default to false)
+     * @param {Boolean} opts.skipAddToFavorites Flag to indicate whether the task should not be added to the user&#39;s task favorites. (default to false)
+     * data is of type: {module:model/TaskEntry}
+     */
+    this.updateTaskVariable = function (taskId, variableName, variableBody, opts) {
+      opts = opts || {};
+      var postBody = variableBody;
+
+      // verify the required parameter 'taskId' is set
+      if (taskId == undefined || taskId == null) {
+        throw "Missing the required parameter 'taskId' when calling updateTaskVariable";
+      }
+      // verify the required parameter 'variableName' is set
+      if (variableName == undefined || variableName == null) {
+        throw "Missing the required parameter 'variableName' when calling updateTaskVariable";
+      }
+
+      // verify the required parameter 'variableBody' is set
+      if (variableBody == undefined || variableBody == null) {
+        throw "Missing the required parameter 'variableBody' when calling updateTaskVariable";
+      }
+
+      var pathParams = {
+        'taskId': taskId,
+        'variableName': variableName
+      };
+      var queryParams = {
+        'skipConfiguration': opts['skipConfiguration'],
+        'skipAddToFavorites': opts['skipAddToFavorites']
+      };
+      var headerParams = {};
+      var formParams = {};
+
+      var authNames = ['basicAuth'];
+      var contentTypes = ['application/json'];
+      var accepts = ['application/json'];
+      var returnType = VariableEntry;
+
+      return this.apiClient.callApi('/tasks/{taskId}/variables/{variableName}', 'PUT', pathParams, queryParams, headerParams, formParams, postBody, authNames, contentTypes, accepts, returnType);
+    };
+  };
+
+  return exports;
+});
+
+},{"../../../alfrescoApiClient":330,"../model/Error":297,"../model/TaskEntry":318,"../model/TaskPaging":321}],290:[function(require,module,exports){
+'use strict';
+
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
+
+(function (factory) {
+  if (typeof define === 'function' && define.amd) {
+    // AMD. Register as an anonymous module.
+    define(['../../alfrescoApiClient', './model/CandidatePaging', './model/CandidatePagingList', './model/Deployment', './model/DeploymentEntry', './model/DeploymentPaging', './model/DeploymentPagingList', './model/Error', './model/ErrorError', './model/Pagination', './model/Process', './model/ProcessBody', './model/ProcessDefinition', './model/ProcessDefinitionEntry', './model/ProcessDefinitionPaging', './model/ProcessDefinitionPagingList', './model/ProcessDefinitionStartFormPaging', './model/ProcessDefinitionStartFormPagingList', './model/ProcessEntry', './model/ProcessItem', './model/ProcessItemBody', './model/ProcessItemEntry', './model/ProcessItemsPaging', './model/ProcessItemsPagingList', './model/ProcessPaging', './model/ProcessPagingList', './model/Task', './model/TaskBody', './model/TaskEntry', './model/TaskFormsPaging', './model/TaskFormsPagingList', './model/TaskPaging', './model/TaskPagingList', './model/Variable', './model/Variable1', './model/VariableBody', './model/VariableEntry', './model/VariablePaging', './model/VariablePagingList', './api/DeploymentsApi', './api/ProcessDefinitionsApi', './api/ProcessesApi', './api/TasksApi'], factory);
+  } else if ((typeof module === 'undefined' ? 'undefined' : _typeof(module)) === 'object' && module.exports) {
+    // CommonJS-like environments that support module.exports, like Node.
+    module.exports = factory(require('../../alfrescoApiClient'), require('./model/CandidatePaging'), require('./model/CandidatePagingList'), require('./model/Deployment'), require('./model/DeploymentEntry'), require('./model/DeploymentPaging'), require('./model/DeploymentPagingList'), require('./model/Error'), require('./model/ErrorError'), require('./model/Pagination'), require('./model/Process'), require('./model/ProcessBody'), require('./model/ProcessDefinition'), require('./model/ProcessDefinitionEntry'), require('./model/ProcessDefinitionPaging'), require('./model/ProcessDefinitionPagingList'), require('./model/ProcessDefinitionStartFormPaging'), require('./model/ProcessDefinitionStartFormPagingList'), require('./model/ProcessEntry'), require('./model/ProcessItem'), require('./model/ProcessItemBody'), require('./model/ProcessItemEntry'), require('./model/ProcessItemsPaging'), require('./model/ProcessItemsPagingList'), require('./model/ProcessPaging'), require('./model/ProcessPagingList'), require('./model/Task'), require('./model/TaskBody'), require('./model/TaskEntry'), require('./model/TaskFormsPaging'), require('./model/TaskFormsPagingList'), require('./model/TaskPaging'), require('./model/TaskPagingList'), require('./model/Variable'), require('./model/Variable1'), require('./model/VariableBody'), require('./model/VariableEntry'), require('./model/VariablePaging'), require('./model/VariablePagingList'), require('./api/DeploymentsApi'), require('./api/ProcessDefinitionsApi'), require('./api/ProcessesApi'), require('./api/TasksApi'));
+  }
+})(function (ApiClient, CandidatePaging, CandidatePagingList, Deployment, DeploymentEntry, DeploymentPaging, DeploymentPagingList, Error, ErrorError, Pagination, Process, ProcessBody, ProcessDefinition, ProcessDefinitionEntry, ProcessDefinitionPaging, ProcessDefinitionPagingList, ProcessDefinitionStartFormPaging, ProcessDefinitionStartFormPagingList, ProcessEntry, ProcessItem, ProcessItemBody, ProcessItemEntry, ProcessItemsPaging, ProcessItemsPagingList, ProcessPaging, ProcessPagingList, Task, TaskBody, TaskEntry, TaskFormsPaging, TaskFormsPagingList, TaskPaging, TaskPagingList, Variable, Variable1, VariableBody, VariableEntry, VariablePaging, VariablePagingList, DeploymentsApi, ProcessDefinitionsApi, ProcessesApi, TasksApi) {
+  'use strict';
+
+  /**
+   * Provides access to the workflow features of Activiti Community embedded in Alfresco.\n\nThis API uses the term **entity** to refer to an object in an Alfresco repository.\nAn **entity** is of a specific **type**, and has a unique **id**.\n\n* The **id** of an entity of type **node** is the **NodeRef** with the &#x60;workspace://SpacesStore&#x60; prefix removed.\n* The **id** of an entity of type **Deployment** is the Deployment&#39;s short name.\n* The **id** for an entity of type **person** is the person&#39;s username.\n.<br>
+   * The <code>index</code> module provides access to constructors for all the classes which comprise the public API.
+   * <p>
+   * An AMD (recommended!) or CommonJS application will generally do something equivalent to the following:
+   * <pre>
+   * var AlfrescoWorkflowRestApi = require('./index'); // See note below*.
+   * var xxxSvc = new AlfrescoWorkflowRestApi.XxxApi(); // Allocate the API class we're going to use.
+   * var yyyModel = new AlfrescoWorkflowRestApi.Yyy(); // Construct a model instance.
+   * yyyModel.someProperty = 'someValue';
+   * ...
+   * var zzz = xxxSvc.doSomething(yyyModel); // Invoke the service.
+   * ...
+   * </pre>
+   * <em>*NOTE: For a top-level AMD script, use require(['./index'], function(){...}) and put the application logic within the
+   * callback function.</em>
+   * </p>
+   * <p>
+   * A non-AMD browser application (discouraged) might do something like this:
+   * <pre>
+   * var xxxSvc = new AlfrescoWorkflowRestApi.XxxApi(); // Allocate the API class we're going to use.
+   * var yyy = new AlfrescoWorkflowRestApi.Yyy(); // Construct a model instance.
+   * yyyModel.someProperty = 'someValue';
+   * ...
+   * var zzz = xxxSvc.doSomething(yyyModel); // Invoke the service.
+   * ...
+   * </pre>
+   * </p>
+   * @module index
+   * @version 0.1.0
+   */
+
+  var exports = {
+    /**
+     * The ApiClient constructor.
+     * @property {module:ApiClient}
+     */
+    ApiClient: ApiClient,
+    /**
+     * The CandidatePaging model constructor.
+     * @property {module:model/CandidatePaging}
+     */
+    CandidatePaging: CandidatePaging,
+    /**
+     * The CandidatePagingList model constructor.
+     * @property {module:model/CandidatePagingList}
+     */
+    CandidatePagingList: CandidatePagingList,
+    /**
+     * The Deployment model constructor.
+     * @property {module:model/Deployment}
+     */
+    Deployment: Deployment,
+    /**
+     * The DeploymentEntry model constructor.
+     * @property {module:model/DeploymentEntry}
+     */
+    DeploymentEntry: DeploymentEntry,
+    /**
+     * The DeploymentPaging model constructor.
+     * @property {module:model/DeploymentPaging}
+     */
+    DeploymentPaging: DeploymentPaging,
+    /**
+     * The DeploymentPagingList model constructor.
+     * @property {module:model/DeploymentPagingList}
+     */
+    DeploymentPagingList: DeploymentPagingList,
+    /**
+     * The Error model constructor.
+     * @property {module:model/Error}
+     */
+    Error: Error,
+    /**
+     * The ErrorError model constructor.
+     * @property {module:model/ErrorError}
+     */
+    ErrorError: ErrorError,
+    /**
+     * The Pagination model constructor.
+     * @property {module:model/Pagination}
+     */
+    Pagination: Pagination,
+    /**
+     * The Process model constructor.
+     * @property {module:model/Process}
+     */
+    Process: Process,
+    /**
+     * The ProcessBody model constructor.
+     * @property {module:model/ProcessBody}
+     */
+    ProcessBody: ProcessBody,
+    /**
+     * The ProcessDefinition model constructor.
+     * @property {module:model/ProcessDefinition}
+     */
+    ProcessDefinition: ProcessDefinition,
+    /**
+     * The ProcessDefinitionEntry model constructor.
+     * @property {module:model/ProcessDefinitionEntry}
+     */
+    ProcessDefinitionEntry: ProcessDefinitionEntry,
+    /**
+     * The ProcessDefinitionPaging model constructor.
+     * @property {module:model/ProcessDefinitionPaging}
+     */
+    ProcessDefinitionPaging: ProcessDefinitionPaging,
+    /**
+     * The ProcessDefinitionPagingList model constructor.
+     * @property {module:model/ProcessDefinitionPagingList}
+     */
+    ProcessDefinitionPagingList: ProcessDefinitionPagingList,
+    /**
+     * The ProcessDefinitionStartFormPaging model constructor.
+     * @property {module:model/ProcessDefinitionStartFormPaging}
+     */
+    ProcessDefinitionStartFormPaging: ProcessDefinitionStartFormPaging,
+    /**
+     * The ProcessDefinitionStartFormPagingList model constructor.
+     * @property {module:model/ProcessDefinitionStartFormPagingList}
+     */
+    ProcessDefinitionStartFormPagingList: ProcessDefinitionStartFormPagingList,
+    /**
+     * The ProcessEntry model constructor.
+     * @property {module:model/ProcessEntry}
+     */
+    ProcessEntry: ProcessEntry,
+    /**
+     * The ProcessItem model constructor.
+     * @property {module:model/ProcessItem}
+     */
+    ProcessItem: ProcessItem,
+    /**
+     * The ProcessItemBody model constructor.
+     * @property {module:model/ProcessItemBody}
+     */
+    ProcessItemBody: ProcessItemBody,
+    /**
+     * The ProcessItemEntry model constructor.
+     * @property {module:model/ProcessItemEntry}
+     */
+    ProcessItemEntry: ProcessItemEntry,
+    /**
+     * The ProcessItemsPaging model constructor.
+     * @property {module:model/ProcessItemsPaging}
+     */
+    ProcessItemsPaging: ProcessItemsPaging,
+    /**
+     * The ProcessItemsPagingList model constructor.
+     * @property {module:model/ProcessItemsPagingList}
+     */
+    ProcessItemsPagingList: ProcessItemsPagingList,
+    /**
+     * The ProcessPaging model constructor.
+     * @property {module:model/ProcessPaging}
+     */
+    ProcessPaging: ProcessPaging,
+    /**
+     * The ProcessPagingList model constructor.
+     * @property {module: model/ProcessPagingList}
+     */
+    ProcessPagingList: ProcessPagingList,
+    /**
+     * The Task model constructor.
+     * @property {module:model/Task}
+     */
+    Task: Task,
+    /**
+     * The TaskBody model constructor.
+     * @property {module:model/TaskBody}
+     */
+    TaskBody: TaskBody,
+    /**
+     * The TaskEntry model constructor.
+     * @property {module:model/TaskEntry}
+     */
+    TaskEntry: TaskEntry,
+    /**
+     * The TaskFormsPaging model constructor.
+     * @property {module:model/TaskFormsPaging}
+     */
+    TaskFormsPaging: TaskFormsPaging,
+    /**
+     * The TaskFormsPagingList model constructor.
+     * @property {module:model/TaskFormsPagingList}
+     */
+    TaskFormsPagingList: TaskFormsPagingList,
+    /**
+     * The TaskPaging model constructor.
+     * @property {module:model/TaskPaging}
+     */
+    TaskPaging: TaskPaging,
+    /**
+     * The TaskPagingList model constructor.
+     * @property {module:model/TaskPagingList}
+     */
+    TaskPagingList: TaskPagingList,
+    /**
+     * The Variable model constructor.
+     * @property {module:model/Variable}
+     */
+    Variable: Variable,
+    /**
+     * The Variable1 model constructor.
+     * @property {module:model/Variable1}
+     */
+    Variable1: Variable1,
+    /**
+     * The VariableBody model constructor.
+     * @property {module:model/VariableBody}
+     */
+    VariableBody: VariableBody,
+    /**
+     * The VariableEntry model constructor.
+     * @property {module:model/VariableEntry}
+     */
+    VariableEntry: VariableEntry,
+    /**
+     * The VariablePaging model constructor.
+     * @property {module:model/VariablePaging}
+     */
+    VariablePaging: VariablePaging,
+    /**
+     * The VariablePagingList model constructor.
+     * @property {module:model/VariablePagingList}
+     */
+    VariablePagingList: VariablePagingList,
+    /**
+     * The DeploymentsApi service constructor.
+     * @property {module:api/DeploymentsApi}
+     */
+    DeploymentsApi: DeploymentsApi,
+    /**
+     * The ProcessDefinitionsApi service constructor.
+     * @property {module:api/ProcessDefinitionsApi}
+     */
+    ProcessDefinitionsApi: ProcessDefinitionsApi,
+    /**
+     * The ProcessesApi service constructor.
+     * @property {module:api/ProcessesApi}
+     */
+    ProcessesApi: ProcessesApi,
+    /**
+     * The TasksApi service constructor.
+     * @property {module:api/TasksApi}
+     */
+    TasksApi: TasksApi
+  };
+
+  return exports;
+});
+
+},{"../../alfrescoApiClient":330,"./api/DeploymentsApi":286,"./api/ProcessDefinitionsApi":287,"./api/ProcessesApi":288,"./api/TasksApi":289,"./model/CandidatePaging":291,"./model/CandidatePagingList":292,"./model/Deployment":293,"./model/DeploymentEntry":294,"./model/DeploymentPaging":295,"./model/DeploymentPagingList":296,"./model/Error":297,"./model/ErrorError":298,"./model/Pagination":299,"./model/Process":300,"./model/ProcessBody":301,"./model/ProcessDefinition":302,"./model/ProcessDefinitionEntry":303,"./model/ProcessDefinitionPaging":304,"./model/ProcessDefinitionPagingList":305,"./model/ProcessDefinitionStartFormPaging":306,"./model/ProcessDefinitionStartFormPagingList":307,"./model/ProcessEntry":308,"./model/ProcessItem":309,"./model/ProcessItemBody":310,"./model/ProcessItemEntry":311,"./model/ProcessItemsPaging":312,"./model/ProcessItemsPagingList":313,"./model/ProcessPaging":314,"./model/ProcessPagingList":315,"./model/Task":316,"./model/TaskBody":317,"./model/TaskEntry":318,"./model/TaskFormsPaging":319,"./model/TaskFormsPagingList":320,"./model/TaskPaging":321,"./model/TaskPagingList":322,"./model/Variable":323,"./model/Variable1":324,"./model/VariableBody":325,"./model/VariableEntry":326,"./model/VariablePaging":327,"./model/VariablePagingList":328}],291:[function(require,module,exports){
+'use strict';
+
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
+
+(function (root, factory) {
+  if (typeof define === 'function' && define.amd) {
+    // AMD. Register as an anonymous module.
+    define(['../../../alfrescoApiClient', './CandidatePagingList'], factory);
+  } else if ((typeof module === 'undefined' ? 'undefined' : _typeof(module)) === 'object' && module.exports) {
+    // CommonJS-like environments that support module.exports, like Node.
+    module.exports = factory(require('../../../alfrescoApiClient'), require('./CandidatePagingList'));
+  } else {
+    // Browser globals (root is window)
+    if (!root.AlfrescoWorkflowRestApi) {
+      root.AlfrescoWorkflowRestApi = {};
+    }
+    root.AlfrescoWorkflowRestApi.CandidatePaging = factory(root.AlfrescoWorkflowRestApi.ApiClient, root.AlfrescoWorkflowRestApi.CandidatePagingList);
+  }
+})(undefined, function (ApiClient, CandidatePagingList) {
+  'use strict';
+
+  /**
+   * The CandidatePaging model module.
+   * @module model/CandidatePaging
+   * @version 0.1.0
+   */
+
+  /**
+   * Constructs a new <code>CandidatePaging</code>.
+   * @alias module:model/CandidatePaging
+   * @class
+   */
+
+  var exports = function exports() {};
+
+  /**
+   * Constructs a <code>CandidatePaging</code> from a plain JavaScript object, optionally creating a new instance.
+   * Copies all relevant properties from <code>data</code> to <code>obj</code> if supplied or a new instance if not.
+   * @param {Object} data The plain JavaScript object bearing properties of interest.
+   * @param {module:model/CandidatePaging} obj Optional instance to populate.
+   * @return {module:model/CandidatePaging} The populated <code>CandidatePaging</code> instance.
+   */
+  exports.constructFromObject = function (data, obj) {
+    if (data) {
+      obj = data || new exports();
+
+      if (data.hasOwnProperty('list')) {
+        obj['list'] = CandidatePagingList.constructFromObject(data['list']);
+      }
+    }
+    return obj;
+  };
+
+  /**
+   * @member {module:model/CandidatePagingList} list
+   */
+  exports.prototype['list'] = undefined;
+
+  return exports;
+});
+
+},{"../../../alfrescoApiClient":330,"./CandidatePagingList":292}],292:[function(require,module,exports){
+'use strict';
+
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
+
+(function (root, factory) {
+  if (typeof define === 'function' && define.amd) {
+    // AMD. Register as an anonymous module.
+    define(['../../../alfrescoApiClient', './Pagination'], factory);
+  } else if ((typeof module === 'undefined' ? 'undefined' : _typeof(module)) === 'object' && module.exports) {
+    // CommonJS-like environments that support module.exports, like Node.
+    module.exports = factory(require('../../../alfrescoApiClient'), require('./Pagination'));
+  } else {
+    // Browser globals (root is window)
+    if (!root.AlfrescoWorkflowRestApi) {
+      root.AlfrescoWorkflowRestApi = {};
+    }
+    root.AlfrescoWorkflowRestApi.CandidatePagingList = factory(root.AlfrescoWorkflowRestApi.ApiClient, root.AlfrescoWorkflowRestApi.Pagination);
+  }
+})(undefined, function (ApiClient, Pagination) {
+  'use strict';
+
+  /**
+   * The CandidatePagingList model module.
+   * @module model/CandidatePagingList
+   * @version 0.1.0
+   */
+
+  /**
+   * Constructs a new <code>CandidatePagingList</code>.
+   * @alias module:model/CandidatePagingList
+   * @class
+   * @param pagination
+   */
+
+  var exports = function exports(pagination) {
+
+    this['pagination'] = pagination;
+  };
+
+  /**
+   * Constructs a <code>CandidatePagingList</code> from a plain JavaScript object, optionally creating a new instance.
+   * Copies all relevant properties from <code>data</code> to <code>obj</code> if supplied or a new instance if not.
+   * @param {Object} data The plain JavaScript object bearing properties of interest.
+   * @param {module:model/CandidatePagingList} obj Optional instance to populate.
+   * @return {module:model/CandidatePagingList} The populated <code>CandidatePagingList</code> instance.
+   */
+  exports.constructFromObject = function (data, obj) {
+    if (data) {
+      obj = data || new exports();
+
+      if (data.hasOwnProperty('pagination')) {
+        obj['pagination'] = Pagination.constructFromObject(data['pagination']);
+      }
+    }
+    return obj;
+  };
+
+  /**
+   * @member {module:model/Pagination} pagination
+   */
+  exports.prototype['pagination'] = undefined;
+
+  return exports;
+});
+
+},{"../../../alfrescoApiClient":330,"./Pagination":299}],293:[function(require,module,exports){
+'use strict';
+
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
+
+(function (root, factory) {
+  if (typeof define === 'function' && define.amd) {
+    // AMD. Register as an anonymous module.
+    define(['../../../alfrescoApiClient'], factory);
+  } else if ((typeof module === 'undefined' ? 'undefined' : _typeof(module)) === 'object' && module.exports) {
+    // CommonJS-like environments that support module.exports, like Node.
+    module.exports = factory(require('../../../alfrescoApiClient'));
+  } else {
+    // Browser globals (root is window)
+    if (!root.AlfrescoWorkflowRestApi) {
+      root.AlfrescoWorkflowRestApi = {};
+    }
+    root.AlfrescoWorkflowRestApi.Deployment = factory(root.AlfrescoWorkflowRestApi.ApiClient);
+  }
+})(undefined, function (ApiClient) {
+  'use strict';
+
+  /**
+   * The Deployment model module.
+   * @module model/Deployment
+   * @version 0.1.0
+   */
+
+  /**
+   * Constructs a new <code>Deployment</code>.
+   * @alias module:model/Deployment
+   * @class
+   * @param id
+   * @param name
+   * @param category
+   * @param deployedAt
+   */
+
+  var exports = function exports(id, name, category, deployedAt) {
+
+    this['id'] = id;
+    this['name'] = name;
+    this['category'] = category;
+    this['deployedAt'] = deployedAt;
+  };
+
+  /**
+   * Constructs a <code>Deployment</code> from a plain JavaScript object, optionally creating a new instance.
+   * Copies all relevant properties from <code>data</code> to <code>obj</code> if supplied or a new instance if not.
+   * @param {Object} data The plain JavaScript object bearing properties of interest.
+   * @param {module:model/Deployment} obj Optional instance to populate.
+   * @return {module:model/Deployment} The populated <code>Deployment</code> instance.
+   */
+  exports.constructFromObject = function (data, obj) {
+    if (data) {
+      obj = data || new exports();
+
+      if (data.hasOwnProperty('id')) {
+        obj['id'] = ApiClient.convertToType(data['id'], 'String');
+      }
+      if (data.hasOwnProperty('name')) {
+        obj['name'] = ApiClient.convertToType(data['name'], 'String');
+      }
+      if (data.hasOwnProperty('category')) {
+        obj['category'] = ApiClient.convertToType(data['category'], 'String');
+      }
+      if (data.hasOwnProperty('deployedAt')) {
+        obj['deployedAt'] = ApiClient.convertToType(data['deployedAt'], 'String');
+      }
+    }
+    return obj;
+  };
+
+  /**
+   * @member {String} id
+   */
+  exports.prototype['id'] = undefined;
+
+  /**
+   * @member {String} name
+   */
+  exports.prototype['name'] = undefined;
+
+  /**
+   * @member {String} category
+   */
+  exports.prototype['category'] = undefined;
+
+  /**
+   * @member {String} deployedAt
+   */
+  exports.prototype['deployedAt'] = undefined;
+
+  return exports;
+});
+
+},{"../../../alfrescoApiClient":330}],294:[function(require,module,exports){
+'use strict';
+
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
+
+(function (root, factory) {
+  if (typeof define === 'function' && define.amd) {
+    // AMD. Register as an anonymous module.
+    define(['../../../alfrescoApiClient', './Deployment'], factory);
+  } else if ((typeof module === 'undefined' ? 'undefined' : _typeof(module)) === 'object' && module.exports) {
+    // CommonJS-like environments that support module.exports, like Node.
+    module.exports = factory(require('../../../alfrescoApiClient'), require('./Deployment'));
+  } else {
+    // Browser globals (root is window)
+    if (!root.AlfrescoWorkflowRestApi) {
+      root.AlfrescoWorkflowRestApi = {};
+    }
+    root.AlfrescoWorkflowRestApi.DeploymentEntry = factory(root.AlfrescoWorkflowRestApi.ApiClient, root.AlfrescoWorkflowRestApi.Deployment);
+  }
+})(undefined, function (ApiClient, Deployment) {
+  'use strict';
+
+  /**
+   * The DeploymentEntry model module.
+   * @module model/DeploymentEntry
+   * @version 0.1.0
+   */
+
+  /**
+   * Constructs a new <code>DeploymentEntry</code>.
+   * @alias module:model/DeploymentEntry
+   * @class
+   * @param entry
+   */
+
+  var exports = function exports(entry) {
+
+    this['entry'] = entry;
+  };
+
+  /**
+   * Constructs a <code>DeploymentEntry</code> from a plain JavaScript object, optionally creating a new instance.
+   * Copies all relevant properties from <code>data</code> to <code>obj</code> if supplied or a new instance if not.
+   * @param {Object} data The plain JavaScript object bearing properties of interest.
+   * @param {module:model/DeploymentEntry} obj Optional instance to populate.
+   * @return {module:model/DeploymentEntry} The populated <code>DeploymentEntry</code> instance.
+   */
+  exports.constructFromObject = function (data, obj) {
+    if (data) {
+      obj = data || new exports();
+
+      if (data.hasOwnProperty('entry')) {
+        obj['entry'] = Deployment.constructFromObject(data['entry']);
+      }
+    }
+    return obj;
+  };
+
+  /**
+   * @member {module:model/Deployment} entry
+   */
+  exports.prototype['entry'] = undefined;
+
+  return exports;
+});
+
+},{"../../../alfrescoApiClient":330,"./Deployment":293}],295:[function(require,module,exports){
+'use strict';
+
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
+
+(function (root, factory) {
+  if (typeof define === 'function' && define.amd) {
+    // AMD. Register as an anonymous module.
+    define(['../../../alfrescoApiClient', './DeploymentPagingList'], factory);
+  } else if ((typeof module === 'undefined' ? 'undefined' : _typeof(module)) === 'object' && module.exports) {
+    // CommonJS-like environments that support module.exports, like Node.
+    module.exports = factory(require('../../../alfrescoApiClient'), require('./DeploymentPagingList'));
+  } else {
+    // Browser globals (root is window)
+    if (!root.AlfrescoWorkflowRestApi) {
+      root.AlfrescoWorkflowRestApi = {};
+    }
+    root.AlfrescoWorkflowRestApi.DeploymentPaging = factory(root.AlfrescoWorkflowRestApi.ApiClient, root.AlfrescoWorkflowRestApi.DeploymentPagingList);
+  }
+})(undefined, function (ApiClient, DeploymentPagingList) {
+  'use strict';
+
+  /**
+   * The DeploymentPaging model module.
+   * @module model/DeploymentPaging
+   * @version 0.1.0
+   */
+
+  /**
+   * Constructs a new <code>DeploymentPaging</code>.
+   * @alias module:model/DeploymentPaging
+   * @class
+   */
+
+  var exports = function exports() {};
+
+  /**
+   * Constructs a <code>DeploymentPaging</code> from a plain JavaScript object, optionally creating a new instance.
+   * Copies all relevant properties from <code>data</code> to <code>obj</code> if supplied or a new instance if not.
+   * @param {Object} data The plain JavaScript object bearing properties of interest.
+   * @param {module:model/DeploymentPaging} obj Optional instance to populate.
+   * @return {module:model/DeploymentPaging} The populated <code>DeploymentPaging</code> instance.
+   */
+  exports.constructFromObject = function (data, obj) {
+    if (data) {
+      obj = data || new exports();
+
+      if (data.hasOwnProperty('list')) {
+        obj['list'] = DeploymentPagingList.constructFromObject(data['list']);
+      }
+    }
+    return obj;
+  };
+
+  /**
+   * @member {module:model/DeploymentPagingList} list
+   */
+  exports.prototype['list'] = undefined;
+
+  return exports;
+});
+
+},{"../../../alfrescoApiClient":330,"./DeploymentPagingList":296}],296:[function(require,module,exports){
+'use strict';
+
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
+
+(function (root, factory) {
+  if (typeof define === 'function' && define.amd) {
+    // AMD. Register as an anonymous module.
+    define(['../../../alfrescoApiClient', './Pagination'], factory);
+  } else if ((typeof module === 'undefined' ? 'undefined' : _typeof(module)) === 'object' && module.exports) {
+    // CommonJS-like environments that support module.exports, like Node.
+    module.exports = factory(require('../../../alfrescoApiClient'), require('./Pagination'));
+  } else {
+    // Browser globals (root is window)
+    if (!root.AlfrescoWorkflowRestApi) {
+      root.AlfrescoWorkflowRestApi = {};
+    }
+    root.AlfrescoWorkflowRestApi.DeploymentPagingList = factory(root.AlfrescoWorkflowRestApi.ApiClient, root.AlfrescoWorkflowRestApi.Pagination);
+  }
+})(undefined, function (ApiClient, Pagination) {
+  'use strict';
+
+  /**
+   * The DeploymentPagingList model module.
+   * @module model/DeploymentPagingList
+   * @version 0.1.0
+   */
+
+  /**
+   * Constructs a new <code>DeploymentPagingList</code>.
+   * @alias module:model/DeploymentPagingList
+   * @class
+   * @param pagination
+   */
+
+  var exports = function exports(pagination) {
+
+    this['pagination'] = pagination;
+  };
+
+  /**
+   * Constructs a <code>DeploymentPagingList</code> from a plain JavaScript object, optionally creating a new instance.
+   * Copies all relevant properties from <code>data</code> to <code>obj</code> if supplied or a new instance if not.
+   * @param {Object} data The plain JavaScript object bearing properties of interest.
+   * @param {module:model/DeploymentPagingList} obj Optional instance to populate.
+   * @return {module:model/DeploymentPagingList} The populated <code>DeploymentPagingList</code> instance.
+   */
+  exports.constructFromObject = function (data, obj) {
+    if (data) {
+      obj = data || new exports();
+
+      if (data.hasOwnProperty('pagination')) {
+        obj['pagination'] = Pagination.constructFromObject(data['pagination']);
+      }
+    }
+    return obj;
+  };
+
+  /**
+   * @member {module:model/Pagination} pagination
+   */
+  exports.prototype['pagination'] = undefined;
+
+  return exports;
+});
+
+},{"../../../alfrescoApiClient":330,"./Pagination":299}],297:[function(require,module,exports){
+'use strict';
+
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
+
+(function (root, factory) {
+  if (typeof define === 'function' && define.amd) {
+    // AMD. Register as an anonymous module.
+    define(['../../../alfrescoApiClient', './ErrorError'], factory);
+  } else if ((typeof module === 'undefined' ? 'undefined' : _typeof(module)) === 'object' && module.exports) {
+    // CommonJS-like environments that support module.exports, like Node.
+    module.exports = factory(require('../../../alfrescoApiClient'), require('./ErrorError'));
+  } else {
+    // Browser globals (root is window)
+    if (!root.AlfrescoWorkflowRestApi) {
+      root.AlfrescoWorkflowRestApi = {};
+    }
+    root.AlfrescoWorkflowRestApi.Error = factory(root.AlfrescoWorkflowRestApi.ApiClient, root.AlfrescoWorkflowRestApi.ErrorError);
+  }
+})(undefined, function (ApiClient, ErrorError) {
+  'use strict';
+
+  /**
+   * The Error model module.
+   * @module model/Error
+   * @version 0.1.0
+   */
+
+  /**
+   * Constructs a new <code>Error</code>.
+   * @alias module:model/Error
+   * @class
+   */
+
+  var exports = function exports() {};
+
+  /**
+   * Constructs a <code>Error</code> from a plain JavaScript object, optionally creating a new instance.
+   * Copies all relevant properties from <code>data</code> to <code>obj</code> if supplied or a new instance if not.
+   * @param {Object} data The plain JavaScript object bearing properties of interest.
+   * @param {module:model/Error} obj Optional instance to populate.
+   * @return {module:model/Error} The populated <code>Error</code> instance.
+   */
+  exports.constructFromObject = function (data, obj) {
+    if (data) {
+      obj = data || new exports();
+
+      if (data.hasOwnProperty('error')) {
+        obj['error'] = ErrorError.constructFromObject(data['error']);
+      }
+    }
+    return obj;
+  };
+
+  /**
+   * @member {module:model/ErrorError} error
+   */
+  exports.prototype['error'] = undefined;
+
+  return exports;
+});
+
+},{"../../../alfrescoApiClient":330,"./ErrorError":298}],298:[function(require,module,exports){
+'use strict';
+
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
+
+(function (root, factory) {
+  if (typeof define === 'function' && define.amd) {
+    // AMD. Register as an anonymous module.
+    define(['../../../alfrescoApiClient'], factory);
+  } else if ((typeof module === 'undefined' ? 'undefined' : _typeof(module)) === 'object' && module.exports) {
+    // CommonJS-like environments that support module.exports, like Node.
+    module.exports = factory(require('../../../alfrescoApiClient'));
+  } else {
+    // Browser globals (root is window)
+    if (!root.AlfrescoWorkflowRestApi) {
+      root.AlfrescoWorkflowRestApi = {};
+    }
+    root.AlfrescoWorkflowRestApi.ErrorError = factory(root.AlfrescoWorkflowRestApi.ApiClient);
+  }
+})(undefined, function (ApiClient) {
+  'use strict';
+
+  /**
+   * The ErrorError model module.
+   * @module model/ErrorError
+   * @version 0.1.0
+   */
+
+  /**
+   * Constructs a new <code>ErrorError</code>.
+   * @alias module:model/ErrorError
+   * @class
+   * @param briefSummary
+   * @param descriptionURL
+   * @param stackTrace
+   * @param statusCode
+   */
+
+  var exports = function exports(briefSummary, descriptionURL, stackTrace, statusCode) {
+
+    this['briefSummary'] = briefSummary;
+    this['descriptionURL'] = descriptionURL;
+
+    this['stackTrace'] = stackTrace;
+    this['statusCode'] = statusCode;
+  };
+
+  /**
+   * Constructs a <code>ErrorError</code> from a plain JavaScript object, optionally creating a new instance.
+   * Copies all relevant properties from <code>data</code> to <code>obj</code> if supplied or a new instance if not.
+   * @param {Object} data The plain JavaScript object bearing properties of interest.
+   * @param {module:model/ErrorError} obj Optional instance to populate.
+   * @return {module:model/ErrorError} The populated <code>ErrorError</code> instance.
+   */
+  exports.constructFromObject = function (data, obj) {
+    if (data) {
+      obj = data || new exports();
+
+      if (data.hasOwnProperty('errorKey')) {
+        obj['errorKey'] = ApiClient.convertToType(data['errorKey'], 'String');
+      }
+      if (data.hasOwnProperty('briefSummary')) {
+        obj['briefSummary'] = ApiClient.convertToType(data['briefSummary'], 'String');
+      }
+      if (data.hasOwnProperty('descriptionURL')) {
+        obj['descriptionURL'] = ApiClient.convertToType(data['descriptionURL'], 'String');
+      }
+      if (data.hasOwnProperty('logId')) {
+        obj['logId'] = ApiClient.convertToType(data['logId'], 'String');
+      }
+      if (data.hasOwnProperty('stackTrace')) {
+        obj['stackTrace'] = ApiClient.convertToType(data['stackTrace'], 'String');
+      }
+      if (data.hasOwnProperty('statusCode')) {
+        obj['statusCode'] = ApiClient.convertToType(data['statusCode'], 'Integer');
+      }
+    }
+    return obj;
+  };
+
+  /**
+   * @member {String} errorKey
+   */
+  exports.prototype['errorKey'] = undefined;
+
+  /**
+   * @member {String} briefSummary
+   */
+  exports.prototype['briefSummary'] = undefined;
+
+  /**
+   * @member {String} descriptionURL
+   */
+  exports.prototype['descriptionURL'] = undefined;
+
+  /**
+   * @member {String} logId
+   */
+  exports.prototype['logId'] = undefined;
+
+  /**
+   * @member {String} stackTrace
+   */
+  exports.prototype['stackTrace'] = undefined;
+
+  /**
+   * @member {Integer} statusCode
+   */
+  exports.prototype['statusCode'] = undefined;
+
+  return exports;
+});
+
+},{"../../../alfrescoApiClient":330}],299:[function(require,module,exports){
+'use strict';
+
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
+
+(function (root, factory) {
+  if (typeof define === 'function' && define.amd) {
+    // AMD. Register as an anonymous module.
+    define(['../../../alfrescoApiClient'], factory);
+  } else if ((typeof module === 'undefined' ? 'undefined' : _typeof(module)) === 'object' && module.exports) {
+    // CommonJS-like environments that support module.exports, like Node.
+    module.exports = factory(require('../../../alfrescoApiClient'));
+  } else {
+    // Browser globals (root is window)
+    if (!root.AlfrescoCoreRestApi) {
+      root.AlfrescoCoreRestApi = {};
+    }
+    root.AlfrescoCoreRestApi.Pagination = factory(root.AlfrescoCoreRestApi.ApiClient);
+  }
+})(undefined, function (ApiClient) {
+  'use strict';
+
+  /**
+   * The Pagination model module.
+   * @module model/Pagination
+   * @version 0.1.0
+   */
+
+  /**
+   * Constructs a new <code>Pagination</code>.
+   * @alias module:model/Pagination
+   * @class
+   * @param count
+   * @param hasMoreItems
+   * @param skipCount
+   * @param maxItems
+   */
+
+  var exports = function exports(count, hasMoreItems, skipCount, maxItems) {
+
+    this['count'] = count;
+    this['hasMoreItems'] = hasMoreItems;
+
+    this['skipCount'] = skipCount;
+    this['maxItems'] = maxItems;
+  };
+
+  /**
+   * Constructs a <code>Pagination</code> from a plain JavaScript object, optionally creating a new instance.
+   * Copies all relevant properties from <code>data</code> to <code>obj</code> if supplied or a new instance if not.
+   * @param {Object} data The plain JavaScript object bearing properties of interest.
+   * @param {module:model/Pagination} obj Optional instance to populate.
+   * @return {module:model/Pagination} The populated <code>Pagination</code> instance.
+   */
+  exports.constructFromObject = function (data, obj) {
+    if (data) {
+      obj = data || new exports();
+
+      if (data.hasOwnProperty('count')) {
+        obj['count'] = ApiClient.convertToType(data['count'], 'Integer');
+      }
+      if (data.hasOwnProperty('hasMoreItems')) {
+        obj['hasMoreItems'] = ApiClient.convertToType(data['hasMoreItems'], 'Boolean');
+      }
+      if (data.hasOwnProperty('totalItems')) {
+        obj['totalItems'] = ApiClient.convertToType(data['totalItems'], 'Integer');
+      }
+      if (data.hasOwnProperty('skipCount')) {
+        obj['skipCount'] = ApiClient.convertToType(data['skipCount'], 'Integer');
+      }
+      if (data.hasOwnProperty('maxItems')) {
+        obj['maxItems'] = ApiClient.convertToType(data['maxItems'], 'Integer');
+      }
+    }
+    return obj;
+  };
+
+  /**
+   * The number of objects in the entries array.\n
+   * @member {Integer} count
+   */
+  exports.prototype['count'] = undefined;
+
+  /**
+   * A boolean value which is **true** if there are more entities in the collection\nbeyond those in this response. A true value means a request with a larger value\nfor the **skipCount** or the **maxItems** parameter will return more entities.\n
+   * @member {Boolean} hasMoreItems
+   */
+  exports.prototype['hasMoreItems'] = undefined;
+
+  /**
+   * An integer describing the total number of entities in the collection.\nThe API might not be able to determine this value,\nin which case this property will not be present.\n
+   * @member {Integer} totalItems
+   */
+  exports.prototype['totalItems'] = undefined;
+
+  /**
+   * An integer describing how many entities exist in the collection before\nthose included in this list.\n
+   * @member {Integer} skipCount
+   */
+  exports.prototype['skipCount'] = undefined;
+
+  /**
+   * The value of the **maxItems** parameter used to generate this list,\nor if there was no **maxItems** parameter the default value, 10\n
+   * @member {Integer} maxItems
+   */
+  exports.prototype['maxItems'] = undefined;
+
+  return exports;
+});
+
+},{"../../../alfrescoApiClient":330}],300:[function(require,module,exports){
+'use strict';
+
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
+
+(function (root, factory) {
+  if (typeof define === 'function' && define.amd) {
+    // AMD. Register as an anonymous module.
+    define(['../../../alfrescoApiClient'], factory);
+  } else if ((typeof module === 'undefined' ? 'undefined' : _typeof(module)) === 'object' && module.exports) {
+    // CommonJS-like environments that support module.exports, like Node.
+    module.exports = factory(require('../../../alfrescoApiClient'));
+  } else {
+    // Browser globals (root is window)
+    if (!root.AlfrescoWorkflowRestApi) {
+      root.AlfrescoWorkflowRestApi = {};
+    }
+    root.AlfrescoWorkflowRestApi.Process = factory(root.AlfrescoWorkflowRestApi.ApiClient);
+  }
+})(undefined, function (ApiClient) {
+  'use strict';
+
+  /**
+   * The Process model module.
+   * @module model/Process
+   * @version 0.1.0
+   */
+
+  /**
+   * Constructs a new <code>Process</code>.
+   * @alias module:model/Process
+   * @class
+   * @param id
+   * @param processDefinitionId
+   * @param startedAt
+   * @param startUserId
+   */
+
+  var exports = function exports(id, processDefinitionId, startedAt, startUserId) {
+
+    this['id'] = id;
+    this['processDefinitionId'] = processDefinitionId;
+    this['startedAt'] = startedAt;
+    this['startUserId'] = startUserId;
+  };
+
+  /**
+   * Constructs a <code>Process</code> from a plain JavaScript object, optionally creating a new instance.
+   * Copies all relevant properties from <code>data</code> to <code>obj</code> if supplied or a new instance if not.
+   * @param {Object} data The plain JavaScript object bearing properties of interest.
+   * @param {module:model/Process} obj Optional instance to populate.
+   * @return {module:model/Process} The populated <code>Process</code> instance.
+   */
+  exports.constructFromObject = function (data, obj) {
+    if (data) {
+      obj = data || new exports();
+
+      if (data.hasOwnProperty('id')) {
+        obj['id'] = ApiClient.convertToType(data['id'], 'String');
+      }
+      if (data.hasOwnProperty('processDefinitionId')) {
+        obj['processDefinitionId'] = ApiClient.convertToType(data['processDefinitionId'], 'String');
+      }
+      if (data.hasOwnProperty('startedAt')) {
+        obj['startedAt'] = ApiClient.convertToType(data['startedAt'], 'String');
+      }
+      if (data.hasOwnProperty('startUserId')) {
+        obj['startUserId'] = ApiClient.convertToType(data['startUserId'], 'String');
+      }
+    }
+    return obj;
+  };
+
+  /**
+   * @member {String} id
+   */
+  exports.prototype['id'] = undefined;
+
+  /**
+   * @member {String} processDefinitionId
+   */
+  exports.prototype['processDefinitionId'] = undefined;
+
+  /**
+   * @member {String} startedAt
+   */
+  exports.prototype['startedAt'] = undefined;
+
+  /**
+   * @member {String} startUserId
+   */
+  exports.prototype['startUserId'] = undefined;
+
+  return exports;
+});
+
+},{"../../../alfrescoApiClient":330}],301:[function(require,module,exports){
+'use strict';
+
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
+
+(function (root, factory) {
+  if (typeof define === 'function' && define.amd) {
+    // AMD. Register as an anonymous module.
+    define(['../../../alfrescoApiClient', './Variable'], factory);
+  } else if ((typeof module === 'undefined' ? 'undefined' : _typeof(module)) === 'object' && module.exports) {
+    // CommonJS-like environments that support module.exports, like Node.
+    module.exports = factory(require('../../../alfrescoApiClient'), require('./Variable'));
+  } else {
+    // Browser globals (root is window)
+    if (!root.AlfrescoWorkflowRestApi) {
+      root.AlfrescoWorkflowRestApi = {};
+    }
+    root.AlfrescoWorkflowRestApi.ProcessBody = factory(root.AlfrescoWorkflowRestApi.ApiClient, root.AlfrescoWorkflowRestApi.Variable);
+  }
+})(undefined, function (ApiClient) {
+  'use strict';
+
+  /**
+   * The ProcessBody model module.
+   * @module model/ProcessBody
+   * @version 0.1.0
+   */
+
+  /**
+   * Constructs a new <code>ProcessBody</code>.
+   * @alias module:model/ProcessBody
+   * @class
+   * @param processDefinitionKey
+   * @param variables
+   */
+
+  var exports = function exports(processDefinitionKey, variables) {
+
+    this['processDefinitionKey'] = processDefinitionKey;
+
+    this['variables'] = variables;
+  };
+
+  /**
+   * Constructs a <code>ProcessBody</code> from a plain JavaScript object, optionally creating a new instance.
+   * Copies all relevant properties from <code>data</code> to <code>obj</code> if supplied or a new instance if not.
+   * @param {Object} data The plain JavaScript object bearing properties of interest.
+   * @param {module:model/ProcessBody} obj Optional instance to populate.
+   * @return {module:model/ProcessBody} The populated <code>ProcessBody</code> instance.
+   */
+  exports.constructFromObject = function (data, obj) {
+    if (data) {
+      obj = data || new exports();
+
+      if (data.hasOwnProperty('processDefinitionKey')) {
+        obj['processDefinitionKey'] = ApiClient.convertToType(data['processDefinitionKey'], 'String');
+      }
+      if (data.hasOwnProperty('variables')) {
+        obj['variables'] = Variable.constructFromObject(data['variables']);
+      }
+    }
+    return obj;
+  };
+
+  /**
+   * @member {String} processDefinitionKey
+   */
+  exports.prototype['processDefinitionKey'] = undefined;
+
+  /**
+   * @member {module:model/ProcessBody.Variable} variables
+   */
+  exports.prototype['variables'] = undefined;
+
+  return exports;
+});
+
+},{"../../../alfrescoApiClient":330,"./Variable":323}],302:[function(require,module,exports){
+'use strict';
+
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
+
+(function (root, factory) {
+  if (typeof define === 'function' && define.amd) {
+    // AMD. Register as an anonymous module.
+    define(['../../../alfrescoApiClient'], factory);
+  } else if ((typeof module === 'undefined' ? 'undefined' : _typeof(module)) === 'object' && module.exports) {
+    // CommonJS-like environments that support module.exports, like Node.
+    module.exports = factory(require('../../../alfrescoApiClient'));
+  } else {
+    // Browser globals (root is window)
+    if (!root.AlfrescoWorkflowRestApi) {
+      root.AlfrescoWorkflowRestApi = {};
+    }
+    root.AlfrescoWorkflowRestApi.ProcessDefinition = factory(root.AlfrescoWorkflowRestApi.ApiClient);
+  }
+})(undefined, function (ApiClient) {
+  'use strict';
+
+  /**
+   * The ProcessDefinition model module.
+   * @module model/ProcessDefinition
+   * @version 0.1.0
+   */
+
+  /**
+   * Constructs a new <code>ProcessDefinition</code>.
+   * @alias module:model/ProcessDefinition
+   * @class
+   * @param id
+   * @param name
+   * @param category
+   * @param deploymentId
+   * @param description
+   */
+
+  var exports = function exports(id, name, category, deploymentId, description) {
+
+    this['id'] = id;
+    this['name'] = name;
+    this['category'] = category;
+    this['deploymentId'] = deploymentId;
+    this['description'] = description;
+  };
+
+  /**
+   * Constructs a <code>ProcessDefinition</code> from a plain JavaScript object, optionally creating a new instance.
+   * Copies all relevant properties from <code>data</code> to <code>obj</code> if supplied or a new instance if not.
+   * @param {Object} data The plain JavaScript object bearing properties of interest.
+   * @param {module:model/ProcessDefinition} obj Optional instance to populate.
+   * @return {module:model/ProcessDefinition} The populated <code>ProcessDefinition</code> instance.
+   */
+  exports.constructFromObject = function (data, obj) {
+    if (data) {
+      obj = data || new exports();
+
+      if (data.hasOwnProperty('id')) {
+        obj['id'] = ApiClient.convertToType(data['id'], 'String');
+      }
+      if (data.hasOwnProperty('name')) {
+        obj['name'] = ApiClient.convertToType(data['name'], 'String');
+      }
+      if (data.hasOwnProperty('category')) {
+        obj['category'] = ApiClient.convertToType(data['category'], 'String');
+      }
+      if (data.hasOwnProperty('deploymentId')) {
+        obj['deploymentId'] = ApiClient.convertToType(data['deploymentId'], 'String');
+      }
+      if (data.hasOwnProperty('description')) {
+        obj['description'] = ApiClient.convertToType(data['description'], 'String');
+      }
+    }
+    return obj;
+  };
+
+  /**
+   * @member {String} id
+   */
+  exports.prototype['id'] = undefined;
+
+  /**
+   * @member {String} name
+   */
+  exports.prototype['name'] = undefined;
+
+  /**
+   * @member {String} category
+   */
+  exports.prototype['category'] = undefined;
+
+  /**
+   * @member {String} deploymentId
+   */
+  exports.prototype['deploymentId'] = undefined;
+
+  /**
+   * @member {String} description
+   */
+  exports.prototype['description'] = undefined;
+
+  return exports;
+});
+
+},{"../../../alfrescoApiClient":330}],303:[function(require,module,exports){
+'use strict';
+
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
+
+(function (root, factory) {
+  if (typeof define === 'function' && define.amd) {
+    // AMD. Register as an anonymous module.
+    define(['../../../alfrescoApiClient', './ProcessDefinition'], factory);
+  } else if ((typeof module === 'undefined' ? 'undefined' : _typeof(module)) === 'object' && module.exports) {
+    // CommonJS-like environments that support module.exports, like Node.
+    module.exports = factory(require('../../../alfrescoApiClient'), require('./ProcessDefinition'));
+  } else {
+    // Browser globals (root is window)
+    if (!root.AlfrescoWorkflowRestApi) {
+      root.AlfrescoWorkflowRestApi = {};
+    }
+    root.AlfrescoWorkflowRestApi.ProcessDefinitionEntry = factory(root.AlfrescoWorkflowRestApi.ApiClient, root.AlfrescoWorkflowRestApi.ProcessDefinition);
+  }
+})(undefined, function (ApiClient, ProcessDefinition) {
+  'use strict';
+
+  /**
+   * The ProcessDefinitionEntry model module.
+   * @module model/ProcessDefinitionEntry
+   * @version 0.1.0
+   */
+
+  /**
+   * Constructs a new <code>ProcessDefinitionEntry</code>.
+   * @alias module:model/ProcessDefinitionEntry
+   * @class
+   * @param entry
+   */
+
+  var exports = function exports(entry) {
+
+    this['entry'] = entry;
+  };
+
+  /**
+   * Constructs a <code>ProcessDefinitionEntry</code> from a plain JavaScript object, optionally creating a new instance.
+   * Copies all relevant properties from <code>data</code> to <code>obj</code> if supplied or a new instance if not.
+   * @param {Object} data The plain JavaScript object bearing properties of interest.
+   * @param {module:model/ProcessDefinitionEntry} obj Optional instance to populate.
+   * @return {module:model/ProcessDefinitionEntry} The populated <code>ProcessDefinitionEntry</code> instance.
+   */
+  exports.constructFromObject = function (data, obj) {
+    if (data) {
+      obj = data || new exports();
+
+      if (data.hasOwnProperty('entry')) {
+        obj['entry'] = ProcessDefinition.constructFromObject(data['entry']);
+      }
+    }
+    return obj;
+  };
+
+  /**
+   * @member {module:model/ProcessDefinition} entry
+   */
+  exports.prototype['entry'] = undefined;
+
+  return exports;
+});
+
+},{"../../../alfrescoApiClient":330,"./ProcessDefinition":302}],304:[function(require,module,exports){
+'use strict';
+
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
+
+(function (root, factory) {
+  if (typeof define === 'function' && define.amd) {
+    // AMD. Register as an anonymous module.
+    define(['../../../alfrescoApiClient', './ProcessDefinitionPagingList'], factory);
+  } else if ((typeof module === 'undefined' ? 'undefined' : _typeof(module)) === 'object' && module.exports) {
+    // CommonJS-like environments that support module.exports, like Node.
+    module.exports = factory(require('../../../alfrescoApiClient'), require('./ProcessDefinitionPagingList'));
+  } else {
+    // Browser globals (root is window)
+    if (!root.AlfrescoWorkflowRestApi) {
+      root.AlfrescoWorkflowRestApi = {};
+    }
+    root.AlfrescoWorkflowRestApi.ProcessDefinitionPaging = factory(root.AlfrescoWorkflowRestApi.ApiClient, root.AlfrescoWorkflowRestApi.ProcessDefinitionPagingList);
+  }
+})(undefined, function (ApiClient, ProcessDefinitionPagingList) {
+  'use strict';
+
+  /**
+   * The ProcessDefinitionPaging model module.
+   * @module model/ProcessDefinitionPaging
+   * @version 0.1.0
+   */
+
+  /**
+   * Constructs a new <code>ProcessDefinitionPaging</code>.
+   * @alias module:model/ProcessDefinitionPaging
+   * @class
+   */
+
+  var exports = function exports() {};
+
+  /**
+   * Constructs a <code>ProcessDefinitionPaging</code> from a plain JavaScript object, optionally creating a new instance.
+   * Copies all relevant properties from <code>data</code> to <code>obj</code> if supplied or a new instance if not.
+   * @param {Object} data The plain JavaScript object bearing properties of interest.
+   * @param {module:model/ProcessDefinitionPaging} obj Optional instance to populate.
+   * @return {module:model/ProcessDefinitionPaging} The populated <code>ProcessDefinitionPaging</code> instance.
+   */
+  exports.constructFromObject = function (data, obj) {
+    if (data) {
+      obj = data || new exports();
+
+      if (data.hasOwnProperty('list')) {
+        obj['list'] = ProcessDefinitionPagingList.constructFromObject(data['list']);
+      }
+    }
+    return obj;
+  };
+
+  /**
+   * @member {module:model/ProcessDefinitionPagingList} list
+   */
+  exports.prototype['list'] = undefined;
+
+  return exports;
+});
+
+},{"../../../alfrescoApiClient":330,"./ProcessDefinitionPagingList":305}],305:[function(require,module,exports){
+'use strict';
+
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
+
+(function (root, factory) {
+  if (typeof define === 'function' && define.amd) {
+    // AMD. Register as an anonymous module.
+    define(['../../../alfrescoApiClient', './Pagination'], factory);
+  } else if ((typeof module === 'undefined' ? 'undefined' : _typeof(module)) === 'object' && module.exports) {
+    // CommonJS-like environments that support module.exports, like Node.
+    module.exports = factory(require('../../../alfrescoApiClient'), require('./Pagination'));
+  } else {
+    // Browser globals (root is window)
+    if (!root.AlfrescoWorkflowRestApi) {
+      root.AlfrescoWorkflowRestApi = {};
+    }
+    root.AlfrescoWorkflowRestApi.ProcessDefinitionPagingList = factory(root.AlfrescoWorkflowRestApi.ApiClient, root.AlfrescoWorkflowRestApi.Pagination);
+  }
+})(undefined, function (ApiClient, Pagination) {
+  'use strict';
+
+  /**
+   * The ProcessDefinitionPagingList model module.
+   * @module model/ProcessDefinitionPagingList
+   * @version 0.1.0
+   */
+
+  /**
+   * Constructs a new <code>ProcessDefinitionPagingList</code>.
+   * @alias module:model/ProcessDefinitionPagingList
+   * @class
+   * @param pagination
+   */
+
+  var exports = function exports(pagination) {
+
+    this['pagination'] = pagination;
+  };
+
+  /**
+   * Constructs a <code>ProcessDefinitionPagingList</code> from a plain JavaScript object, optionally creating a new instance.
+   * Copies all relevant properties from <code>data</code> to <code>obj</code> if supplied or a new instance if not.
+   * @param {Object} data The plain JavaScript object bearing properties of interest.
+   * @param {module:model/ProcessDefinitionPagingList} obj Optional instance to populate.
+   * @return {module:model/ProcessDefinitionPagingList} The populated <code>ProcessDefinitionPagingList</code> instance.
+   */
+  exports.constructFromObject = function (data, obj) {
+    if (data) {
+      obj = data || new exports();
+
+      if (data.hasOwnProperty('pagination')) {
+        obj['pagination'] = Pagination.constructFromObject(data['pagination']);
+      }
+    }
+    return obj;
+  };
+
+  /**
+   * @member {module:model/Pagination} pagination
+   */
+  exports.prototype['pagination'] = undefined;
+
+  return exports;
+});
+
+},{"../../../alfrescoApiClient":330,"./Pagination":299}],306:[function(require,module,exports){
+'use strict';
+
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
+
+(function (root, factory) {
+  if (typeof define === 'function' && define.amd) {
+    // AMD. Register as an anonymous module.
+    define(['../../../alfrescoApiClient', './ProcessDefinitionStartFormPagingList'], factory);
+  } else if ((typeof module === 'undefined' ? 'undefined' : _typeof(module)) === 'object' && module.exports) {
+    // CommonJS-like environments that support module.exports, like Node.
+    module.exports = factory(require('../../../alfrescoApiClient'), require('./ProcessDefinitionStartFormPagingList'));
+  } else {
+    // Browser globals (root is window)
+    if (!root.AlfrescoWorkflowRestApi) {
+      root.AlfrescoWorkflowRestApi = {};
+    }
+    root.AlfrescoWorkflowRestApi.ProcessDefinitionStartFormPaging = factory(root.AlfrescoWorkflowRestApi.ApiClient, root.AlfrescoWorkflowRestApi.ProcessDefinitionStartFormPagingList);
+  }
+})(undefined, function (ApiClient, ProcessDefinitionStartFormPagingList) {
+  'use strict';
+
+  /**
+   * The ProcessDefinitionStartFormPaging model module.
+   * @module model/ProcessDefinitionStartFormPaging
+   * @version 0.1.0
+   */
+
+  /**
+   * Constructs a new <code>ProcessDefinitionStartFormPaging</code>.
+   * @alias module:model/ProcessDefinitionStartFormPaging
+   * @class
+   */
+
+  var exports = function exports() {};
+
+  /**
+   * Constructs a <code>ProcessDefinitionStartFormPaging</code> from a plain JavaScript object, optionally creating a new instance.
+   * Copies all relevant properties from <code>data</code> to <code>obj</code> if supplied or a new instance if not.
+   * @param {Object} data The plain JavaScript object bearing properties of interest.
+   * @param {module:model/ProcessDefinitionStartFormPaging} obj Optional instance to populate.
+   * @return {module:model/ProcessDefinitionStartFormPaging} The populated <code>ProcessDefinitionStartFormPaging</code> instance.
+   */
+  exports.constructFromObject = function (data, obj) {
+    if (data) {
+      obj = data || new exports();
+
+      if (data.hasOwnProperty('list')) {
+        obj['list'] = ProcessDefinitionStartFormPagingList.constructFromObject(data['list']);
+      }
+    }
+    return obj;
+  };
+
+  /**
+   * @member {module:model/ProcessDefinitionStartFormPagingList} list
+   */
+  exports.prototype['list'] = undefined;
+
+  return exports;
+});
+
+},{"../../../alfrescoApiClient":330,"./ProcessDefinitionStartFormPagingList":307}],307:[function(require,module,exports){
+'use strict';
+
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
+
+(function (root, factory) {
+  if (typeof define === 'function' && define.amd) {
+    // AMD. Register as an anonymous module.
+    define(['../../../alfrescoApiClient', './Pagination'], factory);
+  } else if ((typeof module === 'undefined' ? 'undefined' : _typeof(module)) === 'object' && module.exports) {
+    // CommonJS-like environments that support module.exports, like Node.
+    module.exports = factory(require('../../../alfrescoApiClient'), require('./Pagination'));
+  } else {
+    // Browser globals (root is window)
+    if (!root.AlfrescoWorkflowRestApi) {
+      root.AlfrescoWorkflowRestApi = {};
+    }
+    root.AlfrescoWorkflowRestApi.ProcessDefinitionStartFormPagingList = factory(root.AlfrescoWorkflowRestApi.ApiClient, root.AlfrescoWorkflowRestApi.Pagination);
+  }
+})(undefined, function (ApiClient, Pagination) {
+  'use strict';
+
+  /**
+   * The ProcessDefinitionStartFormPagingList model module.
+   * @module model/ProcessDefinitionStartFormPagingList
+   * @version 0.1.0
+   */
+
+  /**
+   * Constructs a new <code>ProcessDefinitionStartFormPagingList</code>.
+   * @alias module:model/ProcessDefinitionStartFormPagingList
+   * @class
+   * @param pagination
+   */
+
+  var exports = function exports(pagination) {
+
+    this['pagination'] = pagination;
+  };
+
+  /**
+   * Constructs a <code>ProcessDefinitionStartFormPagingList</code> from a plain JavaScript object, optionally creating a new instance.
+   * Copies all relevant properties from <code>data</code> to <code>obj</code> if supplied or a new instance if not.
+   * @param {Object} data The plain JavaScript object bearing properties of interest.
+   * @param {module:model/ProcessDefinitionStartFormPagingList} obj Optional instance to populate.
+   * @return {module:model/ProcessDefinitionStartFormPagingList} The populated <code>ProcessDefinitionStartFormPagingList</code> instance.
+   */
+  exports.constructFromObject = function (data, obj) {
+    if (data) {
+      obj = data || new exports();
+
+      if (data.hasOwnProperty('pagination')) {
+        obj['pagination'] = Pagination.constructFromObject(data['pagination']);
+      }
+    }
+    return obj;
+  };
+
+  /**
+   * @member {module:model/Pagination} pagination
+   */
+  exports.prototype['pagination'] = undefined;
+
+  return exports;
+});
+
+},{"../../../alfrescoApiClient":330,"./Pagination":299}],308:[function(require,module,exports){
+'use strict';
+
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
+
+(function (root, factory) {
+  if (typeof define === 'function' && define.amd) {
+    // AMD. Register as an anonymous module.
+    define(['../../../alfrescoApiClient', './Process'], factory);
+  } else if ((typeof module === 'undefined' ? 'undefined' : _typeof(module)) === 'object' && module.exports) {
+    // CommonJS-like environments that support module.exports, like Node.
+    module.exports = factory(require('../../../alfrescoApiClient'), require('./Process'));
+  } else {
+    // Browser globals (root is window)
+    if (!root.AlfrescoWorkflowRestApi) {
+      root.AlfrescoWorkflowRestApi = {};
+    }
+    root.AlfrescoWorkflowRestApi.ProcessEntry = factory(root.AlfrescoWorkflowRestApi.ApiClient, root.AlfrescoWorkflowRestApi.Process);
+  }
+})(undefined, function (ApiClient, Process) {
+  'use strict';
+
+  /**
+   * The ProcessEntry model module.
+   * @module model/ProcessEntry
+   * @version 0.1.0
+   */
+
+  /**
+   * Constructs a new <code>ProcessEntry</code>.
+   * @alias module:model/ProcessEntry
+   * @class
+   * @param entry
+   */
+
+  var exports = function exports(entry) {
+
+    this['entry'] = entry;
+  };
+
+  /**
+   * Constructs a <code>ProcessEntry</code> from a plain JavaScript object, optionally creating a new instance.
+   * Copies all relevant properties from <code>data</code> to <code>obj</code> if supplied or a new instance if not.
+   * @param {Object} data The plain JavaScript object bearing properties of interest.
+   * @param {module:model/ProcessEntry} obj Optional instance to populate.
+   * @return {module:model/ProcessEntry} The populated <code>ProcessEntry</code> instance.
+   */
+  exports.constructFromObject = function (data, obj) {
+    if (data) {
+      obj = data || new exports();
+
+      if (data.hasOwnProperty('entry')) {
+        obj['entry'] = Process.constructFromObject(data['entry']);
+      }
+    }
+    return obj;
+  };
+
+  /**
+   * @member {module:model/Process} entry
+   */
+  exports.prototype['entry'] = undefined;
+
+  return exports;
+});
+
+},{"../../../alfrescoApiClient":330,"./Process":300}],309:[function(require,module,exports){
+'use strict';
+
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
+
+(function (root, factory) {
+  if (typeof define === 'function' && define.amd) {
+    // AMD. Register as an anonymous module.
+    define(['../../../alfrescoApiClient', '../../../alfresco-core-rest-api/src/model/Person'], factory);
+  } else if ((typeof module === 'undefined' ? 'undefined' : _typeof(module)) === 'object' && module.exports) {
+    // CommonJS-like environments that support module.exports, like Node.
+    module.exports = factory(require('../../../alfrescoApiClient'), require('../../../alfresco-core-rest-api/src/model/Person'));
+  } else {
+    // Browser globals (root is window)
+    if (!root.AlfrescoWorkflowRestApi) {
+      root.AlfrescoWorkflowRestApi = {};
+    }
+    if (!root.AlfrescoCoreRestApi) {
+      root.AlfrescoCoreRestApi = {};
+    }
+    root.AlfrescoWorkflowRestApi.ProcessItem = factory(root.AlfrescoWorkflowRestApi.ApiClient, root.AlfrescoCoreRestApi.Person);
+  }
+})(undefined, function (ApiClient, Person) {
+  'use strict';
+
+  /**
+   * The ProcessItem model module.
+   * @module model/ProcessItem
+   * @version 0.1.0
+   */
+
+  /**
+   * Constructs a new <code>ProcessItem</code>.
+   * @alias module:model/ProcessItem
+   * @class
+   * @param id
+   * @param name
+   * @param title
+   * @param description
+   * @param mimeType
+   * @param createdAt
+   * @param modifiedAt
+   */
+
+  var exports = function exports(id, name, title, description, mimeType, createdAt, modifiedAt) {
+
+    this['id'] = id;
+    this['name'] = name;
+    this['title'] = title;
+    this['description'] = description;
+    this['mimeType'] = mimeType;
+    this['createdAt'] = createdAt;
+    this['modifiedAt'] = modifiedAt;
+  };
+
+  /**
+   * Constructs a <code>ProcessItem</code> from a plain JavaScript object, optionally creating a new instance.
+   * Copies all relevant properties from <code>data</code> to <code>obj</code> if supplied or a new instance if not.
+   * @param {Object} data The plain JavaScript object bearing properties of interest.
+   * @param {module:model/ProcessItem} obj Optional instance to populate.
+   * @return {module:model/ProcessItem} The populated <code>ProcessItem</code> instance.
+   */
+  exports.constructFromObject = function (data, obj) {
+    if (data) {
+      obj = data || new exports();
+
+      if (data.hasOwnProperty('id')) {
+        obj['id'] = ApiClient.convertToType(data['id'], 'String');
+      }
+      if (data.hasOwnProperty('name')) {
+        obj['name'] = ApiClient.convertToType(data['name'], 'String');
+      }
+      if (data.hasOwnProperty('title')) {
+        obj['title'] = ApiClient.convertToType(data['title'], 'String');
+      }
+      if (data.hasOwnProperty('description')) {
+        obj['description'] = ApiClient.convertToType(data['description'], 'String');
+      }
+      if (data.hasOwnProperty('mimeType')) {
+        obj['mimeType'] = ApiClient.convertToType(data['mimeType'], 'String');
+      }
+      if (data.hasOwnProperty('createdBy')) {
+        obj['createdBy'] = Person.constructFromObject(data['createdBy']);
+      }
+      if (data.hasOwnProperty('createdAt')) {
+        obj['createdAt'] = ApiClient.convertToType(data['createdAt'], 'String');
+      }
+      if (data.hasOwnProperty('modifiedBy')) {
+        obj['modifiedBy'] = Person.constructFromObject(data['modifiedBy']);
+      }
+      if (data.hasOwnProperty('modifiedAt')) {
+        obj['modifiedAt'] = ApiClient.convertToType(data['modifiedAt'], 'String');
+      }
+    }
+    return obj;
+  };
+
+  /**
+   * @member {String} id
+   */
+  exports.prototype['id'] = undefined;
+
+  /**
+   * @member {String} name
+   */
+  exports.prototype['name'] = undefined;
+
+  /**
+   * @member {String} title
+   */
+  exports.prototype['title'] = undefined;
+
+  /**
+   * @member {String} description
+   */
+  exports.prototype['description'] = undefined;
+
+  /**
+   * @member {String} mimeType
+   */
+  exports.prototype['mimeType'] = undefined;
+
+  /**
+   * @member {module:model/Person} createdBy
+   */
+  exports.prototype['createdBy'] = undefined;
+
+  /**
+   * @member {String} createdAt
+   */
+  exports.prototype['createdAt'] = undefined;
+
+  /**
+   * @member {module:model/Person} modifiedBy
+   */
+  exports.prototype['modifiedBy'] = undefined;
+
+  /**
+   * @member {String} modifiedAt
+   */
+  exports.prototype['modifiedAt'] = undefined;
+
+  return exports;
+});
+
+},{"../../../alfresco-core-rest-api/src/model/Person":238,"../../../alfrescoApiClient":330}],310:[function(require,module,exports){
+'use strict';
+
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
+
+(function (root, factory) {
+  if (typeof define === 'function' && define.amd) {
+    // AMD. Register as an anonymous module.
+    define(['../../../alfrescoApiClient', './Variable'], factory);
+  } else if ((typeof module === 'undefined' ? 'undefined' : _typeof(module)) === 'object' && module.exports) {
+    // CommonJS-like environments that support module.exports, like Node.
+    module.exports = factory(require('../../../alfrescoApiClient'), require('./Variable'));
+  } else {
+    // Browser globals (root is window)
+    if (!root.AlfrescoWorkflowRestApi) {
+      root.AlfrescoWorkflowRestApi = {};
+    }
+    root.AlfrescoWorkflowRestApi.ProcessItemBody = factory(root.AlfrescoWorkflowRestApi.ApiClient, root.AlfrescoWorkflowRestApi.Variable);
+  }
+})(undefined, function (ApiClient) {
+  'use strict';
+
+  /**
+   * The ProcessItemBody model module.
+   * @module model/ProcessItemBody
+   * @version 0.1.0
+   */
+
+  /**
+   * Constructs a new <code>ProcessItemBody</code>.
+   * @alias module:model/ProcessItemBody
+   * @class
+   * @param id
+   */
+
+  var exports = function exports(id) {
+
+    this['id'] = id;
+  };
+
+  /**
+   * Constructs a <code>ProcessItemBody</code> from a plain JavaScript object, optionally creating a new instance.
+   * Copies all relevant properties from <code>data</code> to <code>obj</code> if supplied or a new instance if not.
+   * @param {Object} data The plain JavaScript object bearing properties of interest.
+   * @param {module:model/ProcessItemBody} obj Optional instance to populate.
+   * @return {module:model/ProcessItemBody} The populated <code>ProcessItemBody</code> instance.
+   */
+  exports.constructFromObject = function (data, obj) {
+    if (data) {
+      obj = data || new exports();
+
+      if (data.hasOwnProperty('id')) {
+        obj['id'] = ApiClient.convertToType(data['id'], 'String');
+      }
+    }
+    return obj;
+  };
+
+  /**
+   * @member {String} id
+   */
+  exports.prototype['id'] = undefined;
+
+  return exports;
+});
+
+},{"../../../alfrescoApiClient":330,"./Variable":323}],311:[function(require,module,exports){
+'use strict';
+
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
+
+(function (root, factory) {
+  if (typeof define === 'function' && define.amd) {
+    // AMD. Register as an anonymous module.
+    define(['../../../alfrescoApiClient', './ProcessItem'], factory);
+  } else if ((typeof module === 'undefined' ? 'undefined' : _typeof(module)) === 'object' && module.exports) {
+    // CommonJS-like environments that support module.exports, like Node.
+    module.exports = factory(require('../../../alfrescoApiClient'), require('./ProcessItem'));
+  } else {
+    // Browser globals (root is window)
+    if (!root.AlfrescoWorkflowRestApi) {
+      root.AlfrescoWorkflowRestApi = {};
+    }
+    root.AlfrescoWorkflowRestApi.ProcessItemEntry = factory(root.AlfrescoWorkflowRestApi.ApiClient, root.AlfrescoWorkflowRestApi.ProcessItem);
+  }
+})(undefined, function (ApiClient, ProcessItem) {
+  'use strict';
+
+  /**
+   * The ProcessItemEntry model module.
+   * @module model/ProcessItemEntry
+   * @version 0.1.0
+   */
+
+  /**
+   * Constructs a new <code>ProcessItemEntry</code>.
+   * @alias module:model/ProcessItemEntry
+   * @class
+   * @param entry
+   */
+
+  var exports = function exports(entry) {
+
+    this['entry'] = entry;
+  };
+
+  /**
+   * Constructs a <code>ProcessItemEntry</code> from a plain JavaScript object, optionally creating a new instance.
+   * Copies all relevant properties from <code>data</code> to <code>obj</code> if supplied or a new instance if not.
+   * @param {Object} data The plain JavaScript object bearing properties of interest.
+   * @param {module:model/ProcessItemEntry} obj Optional instance to populate.
+   * @return {module:model/ProcessItemEntry} The populated <code>ProcessItemEntry</code> instance.
+   */
+  exports.constructFromObject = function (data, obj) {
+    if (data) {
+      obj = data || new exports();
+
+      if (data.hasOwnProperty('entry')) {
+        obj['entry'] = ProcessItem.constructFromObject(data['entry']);
+      }
+    }
+    return obj;
+  };
+
+  /**
+   * @member {module:model/ProcessItem} entry
+   */
+  exports.prototype['entry'] = undefined;
+
+  return exports;
+});
+
+},{"../../../alfrescoApiClient":330,"./ProcessItem":309}],312:[function(require,module,exports){
+'use strict';
+
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
+
+(function (root, factory) {
+  if (typeof define === 'function' && define.amd) {
+    // AMD. Register as an anonymous module.
+    define(['../../../alfrescoApiClient', './ProcessItemsPagingList'], factory);
+  } else if ((typeof module === 'undefined' ? 'undefined' : _typeof(module)) === 'object' && module.exports) {
+    // CommonJS-like environments that support module.exports, like Node.
+    module.exports = factory(require('../../../alfrescoApiClient'), require('./ProcessItemsPagingList'));
+  } else {
+    // Browser globals (root is window)
+    if (!root.AlfrescoWorkflowRestApi) {
+      root.AlfrescoWorkflowRestApi = {};
+    }
+    root.AlfrescoWorkflowRestApi.ProcessItemsPaging = factory(root.AlfrescoWorkflowRestApi.ApiClient, root.AlfrescoWorkflowRestApi.ProcessItemsPagingList);
+  }
+})(undefined, function (ApiClient, ProcessItemsPagingList) {
+  'use strict';
+
+  /**
+   * The ProcessItemsPaging model module.
+   * @module model/ProcessItemsPaging
+   * @version 0.1.0
+   */
+
+  /**
+   * Constructs a new <code>ProcessItemsPaging</code>.
+   * @alias module:model/ProcessItemsPaging
+   * @class
+   */
+
+  var exports = function exports() {};
+
+  /**
+   * Constructs a <code>ProcessItemsPaging</code> from a plain JavaScript object, optionally creating a new instance.
+   * Copies all relevant properties from <code>data</code> to <code>obj</code> if supplied or a new instance if not.
+   * @param {Object} data The plain JavaScript object bearing properties of interest.
+   * @param {module:model/ProcessItemsPaging} obj Optional instance to populate.
+   * @return {module:model/ProcessItemsPaging} The populated <code>ProcessItemsPaging</code> instance.
+   */
+  exports.constructFromObject = function (data, obj) {
+    if (data) {
+      obj = data || new exports();
+
+      if (data.hasOwnProperty('list')) {
+        obj['list'] = ProcessItemsPagingList.constructFromObject(data['list']);
+      }
+    }
+    return obj;
+  };
+
+  /**
+   * @member {module:model/ProcessItemsPagingList} list
+   */
+  exports.prototype['list'] = undefined;
+
+  return exports;
+});
+
+},{"../../../alfrescoApiClient":330,"./ProcessItemsPagingList":313}],313:[function(require,module,exports){
+'use strict';
+
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
+
+(function (root, factory) {
+  if (typeof define === 'function' && define.amd) {
+    // AMD. Register as an anonymous module.
+    define(['../../../alfrescoApiClient', './Pagination'], factory);
+  } else if ((typeof module === 'undefined' ? 'undefined' : _typeof(module)) === 'object' && module.exports) {
+    // CommonJS-like environments that support module.exports, like Node.
+    module.exports = factory(require('../../../alfrescoApiClient'), require('./Pagination'));
+  } else {
+    // Browser globals (root is window)
+    if (!root.AlfrescoWorkflowRestApi) {
+      root.AlfrescoWorkflowRestApi = {};
+    }
+    root.AlfrescoWorkflowRestApi.ProcessItemsPagingList = factory(root.AlfrescoWorkflowRestApi.ApiClient, root.AlfrescoWorkflowRestApi.Pagination);
+  }
+})(undefined, function (ApiClient, Pagination) {
+  'use strict';
+
+  /**
+   * The ProcessItemsPagingList model module.
+   * @module model/ProcessItemsPagingList
+   * @version 0.1.0
+   */
+
+  /**
+   * Constructs a new <code>ProcessItemsPagingList</code>.
+   * @alias module:model/ProcessItemsPagingList
+   * @class
+   * @param pagination
+   */
+
+  var exports = function exports(pagination) {
+
+    this['pagination'] = pagination;
+  };
+
+  /**
+   * Constructs a <code>ProcessItemsPagingList</code> from a plain JavaScript object, optionally creating a new instance.
+   * Copies all relevant properties from <code>data</code> to <code>obj</code> if supplied or a new instance if not.
+   * @param {Object} data The plain JavaScript object bearing properties of interest.
+   * @param {module:model/ProcessItemsPagingList} obj Optional instance to populate.
+   * @return {module:model/ProcessItemsPagingList} The populated <code>ProcessItemsPagingList</code> instance.
+   */
+  exports.constructFromObject = function (data, obj) {
+    if (data) {
+      obj = data || new exports();
+
+      if (data.hasOwnProperty('pagination')) {
+        obj['pagination'] = Pagination.constructFromObject(data['pagination']);
+      }
+    }
+    return obj;
+  };
+
+  /**
+   * @member {module:model/Pagination} pagination
+   */
+  exports.prototype['pagination'] = undefined;
+
+  return exports;
+});
+
+},{"../../../alfrescoApiClient":330,"./Pagination":299}],314:[function(require,module,exports){
+'use strict';
+
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
+
+(function (root, factory) {
+  if (typeof define === 'function' && define.amd) {
+    // AMD. Register as an anonymous module.
+    define(['../../../alfrescoApiClient', './ProcessPagingList'], factory);
+  } else if ((typeof module === 'undefined' ? 'undefined' : _typeof(module)) === 'object' && module.exports) {
+    // CommonJS-like environments that support module.exports, like Node.
+    module.exports = factory(require('../../../alfrescoApiClient'), require('./ProcessPagingList'));
+  } else {
+    // Browser globals (root is window)
+    if (!root.AlfrescoWorkflowRestApi) {
+      root.AlfrescoWorkflowRestApi = {};
+    }
+    root.AlfrescoWorkflowRestApi.ProcessPaging = factory(root.AlfrescoWorkflowRestApi.ApiClient, root.AlfrescoWorkflowRestApi.ProcessPagingList);
+  }
+})(undefined, function (ApiClient, ProcessPagingList) {
+  'use strict';
+
+  /**
+   * The ProcessPaging model module.
+   * @module model/ProcessPaging
+   * @version 0.1.0
+   */
+
+  /**
+   * Constructs a new <code>ProcessPaging</code>.
+   * @alias module:model/ProcessPaging
+   * @class
+   */
+
+  var exports = function exports() {};
+
+  /**
+   * Constructs a <code>ProcessPaging</code> from a plain JavaScript object, optionally creating a new instance.
+   * Copies all relevant properties from <code>data</code> to <code>obj</code> if supplied or a new instance if not.
+   * @param {Object} data The plain JavaScript object bearing properties of interest.
+   * @param {module:model/ProcessPaging} obj Optional instance to populate.
+   * @return {module:model/ProcessPaging} The populated <code>ProcessPaging</code> instance.
+   */
+  exports.constructFromObject = function (data, obj) {
+    if (data) {
+      obj = data || new exports();
+
+      if (data.hasOwnProperty('list')) {
+        obj['list'] = ProcessPagingList.constructFromObject(data['list']);
+      }
+    }
+    return obj;
+  };
+
+  /**
+   * @member {module:model/ProcessPagingList} list
+   */
+  exports.prototype['list'] = undefined;
+
+  return exports;
+});
+
+},{"../../../alfrescoApiClient":330,"./ProcessPagingList":315}],315:[function(require,module,exports){
+'use strict';
+
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
+
+(function (root, factory) {
+  if (typeof define === 'function' && define.amd) {
+    // AMD. Register as an anonymous module.
+    define(['../../../alfrescoApiClient', './Pagination'], factory);
+  } else if ((typeof module === 'undefined' ? 'undefined' : _typeof(module)) === 'object' && module.exports) {
+    // CommonJS-like environments that support module.exports, like Node.
+    module.exports = factory(require('../../../alfrescoApiClient'), require('./Pagination'));
+  } else {
+    // Browser globals (root is window)
+    if (!root.AlfrescoWorkflowRestApi) {
+      root.AlfrescoWorkflowRestApi = {};
+    }
+    root.AlfrescoWorkflowRestApi.ProcessPagingList = factory(root.AlfrescoWorkflowRestApi.ApiClient, root.AlfrescoWorkflowRestApi.Pagination);
+  }
+})(undefined, function (ApiClient, Pagination) {
+  'use strict';
+
+  /**
+   * The ProcessPagingList model module.
+   * @module model/ProcessPagingList
+   * @version 0.1.0
+   */
+
+  /**
+   * Constructs a new <code>ProcessPagingList</code>.
+   * @alias module:model/ProcessPagingList
+   * @class
+   * @param pagination
+   */
+
+  var exports = function exports(pagination) {
+
+    this['pagination'] = pagination;
+  };
+
+  /**
+   * Constructs a <code>ProcessPagingList</code> from a plain JavaScript object, optionally creating a new instance.
+   * Copies all relevant properties from <code>data</code> to <code>obj</code> if supplied or a new instance if not.
+   * @param {Object} data The plain JavaScript object bearing properties of interest.
+   * @param {module:model/ProcessPagingList} obj Optional instance to populate.
+   * @return {module:model/ProcessPagingList} The populated <code>ProcessPagingList</code> instance.
+   */
+  exports.constructFromObject = function (data, obj) {
+    if (data) {
+      obj = data || new exports();
+
+      if (data.hasOwnProperty('pagination')) {
+        obj['pagination'] = Pagination.constructFromObject(data['pagination']);
+      }
+    }
+    return obj;
+  };
+
+  /**
+   * @member {module:model/Pagination} pagination
+   */
+  exports.prototype['pagination'] = undefined;
+
+  return exports;
+});
+
+},{"../../../alfrescoApiClient":330,"./Pagination":299}],316:[function(require,module,exports){
+'use strict';
+
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
+
+(function (root, factory) {
+  if (typeof define === 'function' && define.amd) {
+    // AMD. Register as an anonymous module.
+    define(['../../../alfrescoApiClient', './Variable'], factory);
+  } else if ((typeof module === 'undefined' ? 'undefined' : _typeof(module)) === 'object' && module.exports) {
+    // CommonJS-like environments that support module.exports, like Node.
+    module.exports = factory(require('../../../alfrescoApiClient'), require('./Variable'));
+  } else {
+    // Browser globals (root is window)
+    if (!root.AlfrescoWorkflowRestApi) {
+      root.AlfrescoWorkflowRestApi = {};
+    }
+    root.AlfrescoWorkflowRestApi.Task = factory(root.AlfrescoWorkflowRestApi.ApiClient, root.AlfrescoWorkflowRestApi.Variable);
+  }
+})(undefined, function (ApiClient) {
+  'use strict';
+
+  /**
+   * The Task model module.
+   * @module model/Task
+   * @version 0.1.0
+   */
+
+  /**
+   * Constructs a new <code>Task</code>.
+   * @alias module:model/Task
+   * @class
+   * @param id
+   * @param processId
+   * @param name
+   * @param description
+   * @param dueAt
+   * @param assignee
+   * @param formResourceKey
+   * @param state
+   */
+
+  var exports = function exports(id, processId, name, description, dueAt, assignee, formResourceKey, state) {
+
+    this['id'] = id;
+    this['processId'] = processId;
+    this['name'] = name;
+    this['description'] = description;
+    this['dueAt'] = dueAt;
+    this['assignee'] = assignee;
+    this['formResourceKey'] = formResourceKey;
+    this['state'] = state;
+  };
+
+  /**
+   * Constructs a <code>Task</code> from a plain JavaScript object, optionally creating a new instance.
+   * Copies all relevant properties from <code>data</code> to <code>obj</code> if supplied or a new instance if not.
+   * @param {Object} data The plain JavaScript object bearing properties of interest.
+   * @param {module:model/Task} obj Optional instance to populate.
+   * @return {module:model/Task} The populated <code>Task</code> instance.
+   */
+  exports.constructFromObject = function (data, obj) {
+    if (data) {
+      obj = data || new exports();
+
+      if (data.hasOwnProperty('id')) {
+        obj['id'] = ApiClient.convertToType(data['id'], 'String');
+      }
+      if (data.hasOwnProperty('processId')) {
+        obj['processId'] = ApiClient.convertToType(data['processId'], 'String');
+      }
+      if (data.hasOwnProperty('processDefinitionId')) {
+        obj['processDefinitionId'] = ApiClient.convertToType(data['processDefinitionId'], 'String');
+      }
+      if (data.hasOwnProperty('activityDefinitionId')) {
+        obj['activityDefinitionId'] = ApiClient.convertToType(data['activityDefinitionId'], 'String');
+      }
+      if (data.hasOwnProperty('name')) {
+        obj['name'] = ApiClient.convertToType(data['name'], 'String');
+      }
+      if (data.hasOwnProperty('description')) {
+        obj['description'] = ApiClient.convertToType(data['description'], 'String');
+      }
+      if (data.hasOwnProperty('dueAt')) {
+        obj['dueAt'] = ApiClient.convertToType(data['dueAt'], 'String');
+      }
+      if (data.hasOwnProperty('startedAt')) {
+        obj['startedAt'] = ApiClient.convertToType(data['startedAt'], 'String');
+      }
+      if (data.hasOwnProperty('endedAt')) {
+        obj['endedAt'] = ApiClient.convertToType(data['endedAt'], 'String');
+      }
+      if (data.hasOwnProperty('durationInMs')) {
+        obj['durationInMs'] = ApiClient.convertToType(data['durationInMs'], 'String');
+      }
+      if (data.hasOwnProperty('priority')) {
+        obj['priority'] = ApiClient.convertToType(data['priority'], 'String');
+      }
+      if (data.hasOwnProperty('owner')) {
+        obj['owner'] = ApiClient.convertToType(data['owner'], 'String');
+      }
+      if (data.hasOwnProperty('assignee')) {
+        obj['assignee'] = ApiClient.convertToType(data['assignee'], 'String');
+      }
+      if (data.hasOwnProperty('formResourceKey')) {
+        obj['formResourceKey'] = ApiClient.convertToType(data['formResourceKey'], 'String');
+      }
+      if (data.hasOwnProperty('state')) {
+        obj['state'] = ApiClient.convertToType(data['state'], 'String');
+      }
+      if (data.hasOwnProperty('variables')) {
+        obj['variables'] = Variable.constructFromObject(data['variables']);
+      }
+    }
+    return obj;
+  };
+
+  /**
+   * @member {String} id
+   */
+  exports.prototype['id'] = undefined;
+
+  /**
+   * @member {String} processId
+   */
+  exports.prototype['processId'] = undefined;
+
+  /**
+   * @member {String} processDefinitionId
+   */
+  exports.prototype['processDefinitionId'] = undefined;
+
+  /**
+   * @member {String} activityDefinitionId
+   */
+  exports.prototype['activityDefinitionId'] = undefined;
+
+  /**
+   * @member {String} name
+   */
+  exports.prototype['name'] = undefined;
+
+  /**
+   * @member {String} description
+   */
+  exports.prototype['description'] = undefined;
+
+  /**
+   * @member {String} dueAt
+   */
+  exports.prototype['dueAt'] = undefined;
+
+  /**
+   * @member {String} startedAt
+   */
+  exports.prototype['startedAt'] = undefined;
+
+  /**
+   * @member {String} endedAt
+   */
+  exports.prototype['endedAt'] = undefined;
+
+  /**
+   * @member {String} durationInMs
+   */
+  exports.prototype['durationInMs'] = undefined;
+
+  /**
+   * @member {String} priority
+   */
+  exports.prototype['priority'] = undefined;
+
+  /**
+   * @member {String} owner
+   */
+  exports.prototype['owner'] = undefined;
+
+  /**
+   * @member {String} assignee
+   */
+  exports.prototype['assignee'] = undefined;
+
+  /**
+   * @member {String} formResourceKey
+   */
+  exports.prototype['formResourceKey'] = undefined;
+
+  /**
+   * @member {module:model/Task.StateEnum} state
+   */
+  exports.prototype['state'] = undefined;
+
+  /**
+   * @member {module:model/Variable} variables
+   */
+  exports.prototype['variables'] = undefined;
+
+  /**
+   * Allowed values for the <code>state</code> property.
+   * @enum {String}
+   * @readonly
+   */
+  exports.StateEnum = {
+    /**
+     * value: unclaimed
+     * @const
+     */
+    unclaimed: "unclaimed",
+
+    /**
+     * value: claimed
+     * @const
+     */
+    claimed: "claimed",
+
+    /**
+     * value: delegated
+     * @const
+     */
+    delegated: "delegated",
+
+    /**
+     * value: resolved
+     * @const
+     */
+    resolved: "resolved",
+
+    /**
+     * value: completed
+     * @const
+     */
+    completed: "completed"
+  };
+
+  return exports;
+});
+
+},{"../../../alfrescoApiClient":330,"./Variable":323}],317:[function(require,module,exports){
+'use strict';
+
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
+
+(function (root, factory) {
+  if (typeof define === 'function' && define.amd) {
+    // AMD. Register as an anonymous module.
+    define(['../../../alfrescoApiClient', './Variable'], factory);
+  } else if ((typeof module === 'undefined' ? 'undefined' : _typeof(module)) === 'object' && module.exports) {
+    // CommonJS-like environments that support module.exports, like Node.
+    module.exports = factory(require('../../../alfrescoApiClient'), require('./Variable'));
+  } else {
+    // Browser globals (root is window)
+    if (!root.AlfrescoWorkflowRestApi) {
+      root.AlfrescoWorkflowRestApi = {};
+    }
+    root.AlfrescoWorkflowRestApi.TaskBody = factory(root.AlfrescoWorkflowRestApi.ApiClient, root.AlfrescoWorkflowRestApi.Variable);
+  }
+})(undefined, function (ApiClient) {
+  'use strict';
+
+  /**
+   * The TaskBody model module.
+   * @module model/TaskBody
+   * @version 0.1.0
+   */
+
+  /**
+   * Constructs a new <code>TaskBody</code>.
+   * @alias module:model/TaskBody
+   * @class
+   * @param name
+   * @param description
+   * @param dueAt
+   * @param priority
+   * @param owner
+   * @param state
+   * @param variables
+   */
+
+  var exports = function exports(name, description, dueAt, priority, owner, state, variables) {
+
+    this['name'] = name;
+    this['description'] = description;
+    this['dueAt'] = dueAt;
+    this['priority'] = priority;
+    this['owner'] = owner;
+    this['state'] = state;
+    this['variables'] = variables;
+  };
+
+  /**
+   * Constructs a <code>TaskBody</code> from a plain JavaScript object, optionally creating a new instance.
+   * Copies all relevant properties from <code>data</code> to <code>obj</code> if supplied or a new instance if not.
+   * @param {Object} data The plain JavaScript object bearing properties of interest.
+   * @param {module:model/TaskBody} obj Optional instance to populate.
+   * @return {module:model/TaskBody} The populated <code>TaskBody</code> instance.
+   */
+  exports.constructFromObject = function (data, obj) {
+    if (data) {
+      obj = data || new exports();
+
+      if (data.hasOwnProperty('name')) {
+        obj['name'] = ApiClient.convertToType(data['name'], 'String');
+      }
+      if (data.hasOwnProperty('description')) {
+        obj['description'] = ApiClient.convertToType(data['description'], 'String');
+      }
+      if (data.hasOwnProperty('dueAt')) {
+        obj['dueAt'] = ApiClient.convertToType(data['dueAt'], 'String');
+      }
+      if (data.hasOwnProperty('priority')) {
+        obj['priority'] = ApiClient.convertToType(data['priority'], 'String');
+      }
+      if (data.hasOwnProperty('owner')) {
+        obj['owner'] = ApiClient.convertToType(data['owner'], 'String');
+      }
+      if (data.hasOwnProperty('state')) {
+        obj['state'] = ApiClient.convertToType(data['state'], 'String');
+      }
+      if (data.hasOwnProperty('variables')) {
+        obj['variables'] = Variable.constructFromObject(data['variables']);
+      }
+    }
+    return obj;
+  };
+
+  /**
+   * @member {String} name
+   */
+  exports.prototype['name'] = undefined;
+
+  /**
+   * @member {String} description
+   */
+  exports.prototype['description'] = undefined;
+
+  /**
+   * @member {String} dueAt
+   */
+  exports.prototype['dueAt'] = undefined;
+
+  /**
+   * @member {String} priority
+   */
+  exports.prototype['priority'] = undefined;
+
+  /**
+   * @member {String} owner
+   */
+  exports.prototype['owner'] = undefined;
+
+  /**
+   * @member {module:model/TaskBody.StateEnum} state
+   */
+  exports.prototype['state'] = undefined;
+
+  /**
+   * @member {module:model/TaskBody.Variable} variables
+   */
+  exports.prototype['variables'] = undefined;
+
+  /**
+   * Allowed values for the <code>state</code> property.
+   * @enum {String}
+   * @readonly
+   */
+  exports.StateEnum = {
+    /**
+     * value: unclaimed
+     * @const
+     */
+    unclaimed: "unclaimed",
+
+    /**
+     * value: claimed
+     * @const
+     */
+    claimed: "claimed",
+
+    /**
+     * value: delegated
+     * @const
+     */
+    delegated: "delegated",
+
+    /**
+     * value: resolved
+     * @const
+     */
+    resolved: "resolved",
+
+    /**
+     * value: completed
+     * @const
+     */
+    completed: "completed"
+  };
+
+  return exports;
+});
+
+},{"../../../alfrescoApiClient":330,"./Variable":323}],318:[function(require,module,exports){
+'use strict';
+
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
+
+(function (root, factory) {
+  if (typeof define === 'function' && define.amd) {
+    // AMD. Register as an anonymous module.
+    define(['../../../alfrescoApiClient', './Task'], factory);
+  } else if ((typeof module === 'undefined' ? 'undefined' : _typeof(module)) === 'object' && module.exports) {
+    // CommonJS-like environments that support module.exports, like Node.
+    module.exports = factory(require('../../../alfrescoApiClient'), require('./Task'));
+  } else {
+    // Browser globals (root is window)
+    if (!root.AlfrescoWorkflowRestApi) {
+      root.AlfrescoWorkflowRestApi = {};
+    }
+    root.AlfrescoWorkflowRestApi.TaskEntry = factory(root.AlfrescoWorkflowRestApi.ApiClient, root.AlfrescoWorkflowRestApi.Task);
+  }
+})(undefined, function (ApiClient, Task) {
+  'use strict';
+
+  /**
+   * The TaskEntry model module.
+   * @module model/TaskEntry
+   * @version 0.1.0
+   */
+
+  /**
+   * Constructs a new <code>TaskEntry</code>.
+   * @alias module:model/TaskEntry
+   * @class
+   * @param entry
+   */
+
+  var exports = function exports(entry) {
+
+    this['entry'] = entry;
+  };
+
+  /**
+   * Constructs a <code>TaskEntry</code> from a plain JavaScript object, optionally creating a new instance.
+   * Copies all relevant properties from <code>data</code> to <code>obj</code> if supplied or a new instance if not.
+   * @param {Object} data The plain JavaScript object bearing properties of interest.
+   * @param {module:model/TaskEntry} obj Optional instance to populate.
+   * @return {module:model/TaskEntry} The populated <code>TaskEntry</code> instance.
+   */
+  exports.constructFromObject = function (data, obj) {
+    if (data) {
+      obj = data || new exports();
+
+      if (data.hasOwnProperty('entry')) {
+        obj['entry'] = Task.constructFromObject(data['entry']);
+      }
+    }
+    return obj;
+  };
+
+  /**
+   * @member {module:model/Task} entry
+   */
+  exports.prototype['entry'] = undefined;
+
+  return exports;
+});
+
+},{"../../../alfrescoApiClient":330,"./Task":316}],319:[function(require,module,exports){
+'use strict';
+
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
+
+(function (root, factory) {
+  if (typeof define === 'function' && define.amd) {
+    // AMD. Register as an anonymous module.
+    define(['../../../alfrescoApiClient', './TaskFormsPagingList'], factory);
+  } else if ((typeof module === 'undefined' ? 'undefined' : _typeof(module)) === 'object' && module.exports) {
+    // CommonJS-like environments that support module.exports, like Node.
+    module.exports = factory(require('../../../alfrescoApiClient'), require('./TaskFormsPagingList'));
+  } else {
+    // Browser globals (root is window)
+    if (!root.AlfrescoWorkflowRestApi) {
+      root.AlfrescoWorkflowRestApi = {};
+    }
+    root.AlfrescoWorkflowRestApi.TaskFormsPaging = factory(root.AlfrescoWorkflowRestApi.ApiClient, root.AlfrescoWorkflowRestApi.TaskFormsPagingList);
+  }
+})(undefined, function (ApiClient, TaskFormsPagingList) {
+  'use strict';
+
+  /**
+   * The TaskFormsPaging model module.
+   * @module model/TaskFormsPaging
+   * @version 0.1.0
+   */
+
+  /**
+   * Constructs a new <code>TaskFormsPaging</code>.
+   * @alias module:model/TaskFormsPaging
+   * @class
+   */
+
+  var exports = function exports() {};
+
+  /**
+   * Constructs a <code>TaskFormsPaging</code> from a plain JavaScript object, optionally creating a new instance.
+   * Copies all relevant properties from <code>data</code> to <code>obj</code> if supplied or a new instance if not.
+   * @param {Object} data The plain JavaScript object bearing properties of interest.
+   * @param {module:model/TaskFormsPaging} obj Optional instance to populate.
+   * @return {module:model/TaskFormsPaging} The populated <code>TaskFormsPaging</code> instance.
+   */
+  exports.constructFromObject = function (data, obj) {
+    if (data) {
+      obj = data || new exports();
+
+      if (data.hasOwnProperty('list')) {
+        obj['list'] = TaskFormsPagingList.constructFromObject(data['list']);
+      }
+    }
+    return obj;
+  };
+
+  /**
+   * @member {module:model/TaskFormsPagingList} list
+   */
+  exports.prototype['list'] = undefined;
+
+  return exports;
+});
+
+},{"../../../alfrescoApiClient":330,"./TaskFormsPagingList":320}],320:[function(require,module,exports){
+'use strict';
+
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
+
+(function (root, factory) {
+  if (typeof define === 'function' && define.amd) {
+    // AMD. Register as an anonymous module.
+    define(['../../../alfrescoApiClient', './Pagination'], factory);
+  } else if ((typeof module === 'undefined' ? 'undefined' : _typeof(module)) === 'object' && module.exports) {
+    // CommonJS-like environments that support module.exports, like Node.
+    module.exports = factory(require('../../../alfrescoApiClient'), require('./Pagination'));
+  } else {
+    // Browser globals (root is window)
+    if (!root.AlfrescoWorkflowRestApi) {
+      root.AlfrescoWorkflowRestApi = {};
+    }
+    root.AlfrescoWorkflowRestApi.TaskFormsPagingList = factory(root.AlfrescoWorkflowRestApi.ApiClient, root.AlfrescoWorkflowRestApi.Pagination);
+  }
+})(undefined, function (ApiClient, Pagination) {
+  'use strict';
+
+  /**
+   * The TaskFormsPagingList model module.
+   * @module model/TaskFormsPagingList
+   * @version 0.1.0
+   */
+
+  /**
+   * Constructs a new <code>TaskFormsPagingList</code>.
+   * @alias module:model/TaskFormsPagingList
+   * @class
+   * @param pagination
+   */
+
+  var exports = function exports(pagination) {
+
+    this['pagination'] = pagination;
+  };
+
+  /**
+   * Constructs a <code>TaskFormsPagingList</code> from a plain JavaScript object, optionally creating a new instance.
+   * Copies all relevant properties from <code>data</code> to <code>obj</code> if supplied or a new instance if not.
+   * @param {Object} data The plain JavaScript object bearing properties of interest.
+   * @param {module:model/TaskFormsPagingList} obj Optional instance to populate.
+   * @return {module:model/TaskFormsPagingList} The populated <code>TaskFormsPagingList</code> instance.
+   */
+  exports.constructFromObject = function (data, obj) {
+    if (data) {
+      obj = data || new exports();
+
+      if (data.hasOwnProperty('pagination')) {
+        obj['pagination'] = Pagination.constructFromObject(data['pagination']);
+      }
+    }
+    return obj;
+  };
+
+  /**
+   * @member {module:model/Pagination} pagination
+   */
+  exports.prototype['pagination'] = undefined;
+
+  return exports;
+});
+
+},{"../../../alfrescoApiClient":330,"./Pagination":299}],321:[function(require,module,exports){
+'use strict';
+
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
+
+(function (root, factory) {
+  if (typeof define === 'function' && define.amd) {
+    // AMD. Register as an anonymous module.
+    define(['../../../alfrescoApiClient', './TaskPagingList'], factory);
+  } else if ((typeof module === 'undefined' ? 'undefined' : _typeof(module)) === 'object' && module.exports) {
+    // CommonJS-like environments that support module.exports, like Node.
+    module.exports = factory(require('../../../alfrescoApiClient'), require('./TaskPagingList'));
+  } else {
+    // Browser globals (root is window)
+    if (!root.AlfrescoWorkflowRestApi) {
+      root.AlfrescoWorkflowRestApi = {};
+    }
+    root.AlfrescoWorkflowRestApi.TaskPaging = factory(root.AlfrescoWorkflowRestApi.ApiClient, root.AlfrescoWorkflowRestApi.TaskPagingList);
+  }
+})(undefined, function (ApiClient, TaskPagingList) {
+  'use strict';
+
+  /**
+   * The TaskPaging model module.
+   * @module model/TaskPaging
+   * @version 0.1.0
+   */
+
+  /**
+   * Constructs a new <code>TaskPaging</code>.
+   * @alias module:model/TaskPaging
+   * @class
+   */
+
+  var exports = function exports() {};
+
+  /**
+   * Constructs a <code>TaskPaging</code> from a plain JavaScript object, optionally creating a new instance.
+   * Copies all relevant properties from <code>data</code> to <code>obj</code> if supplied or a new instance if not.
+   * @param {Object} data The plain JavaScript object bearing properties of interest.
+   * @param {module:model/TaskPaging} obj Optional instance to populate.
+   * @return {module:model/TaskPaging} The populated <code>TaskPaging</code> instance.
+   */
+  exports.constructFromObject = function (data, obj) {
+    if (data) {
+      obj = data || new exports();
+
+      if (data.hasOwnProperty('list')) {
+        obj['list'] = TaskPagingList.constructFromObject(data['list']);
+      }
+    }
+    return obj;
+  };
+
+  /**
+   * @member {module:model/TaskPagingList} list
+   */
+  exports.prototype['list'] = undefined;
+
+  return exports;
+});
+
+},{"../../../alfrescoApiClient":330,"./TaskPagingList":322}],322:[function(require,module,exports){
+'use strict';
+
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
+
+(function (root, factory) {
+  if (typeof define === 'function' && define.amd) {
+    // AMD. Register as an anonymous module.
+    define(['../../../alfrescoApiClient', './Pagination'], factory);
+  } else if ((typeof module === 'undefined' ? 'undefined' : _typeof(module)) === 'object' && module.exports) {
+    // CommonJS-like environments that support module.exports, like Node.
+    module.exports = factory(require('../../../alfrescoApiClient'), require('./Pagination'));
+  } else {
+    // Browser globals (root is window)
+    if (!root.AlfrescoWorkflowRestApi) {
+      root.AlfrescoWorkflowRestApi = {};
+    }
+    root.AlfrescoWorkflowRestApi.TaskPagingList = factory(root.AlfrescoWorkflowRestApi.ApiClient, root.AlfrescoWorkflowRestApi.Pagination);
+  }
+})(undefined, function (ApiClient, Pagination) {
+  'use strict';
+
+  /**
+   * The TaskPagingList model module.
+   * @module model/TaskPagingList
+   * @version 0.1.0
+   */
+
+  /**
+   * Constructs a new <code>TaskPagingList</code>.
+   * @alias module:model/TaskPagingList
+   * @class
+   * @param pagination
+   */
+
+  var exports = function exports(pagination) {
+
+    this['pagination'] = pagination;
+  };
+
+  /**
+   * Constructs a <code>TaskPagingList</code> from a plain JavaScript object, optionally creating a new instance.
+   * Copies all relevant properties from <code>data</code> to <code>obj</code> if supplied or a new instance if not.
+   * @param {Object} data The plain JavaScript object bearing properties of interest.
+   * @param {module:model/TaskPagingList} obj Optional instance to populate.
+   * @return {module:model/TaskPagingList} The populated <code>TaskPagingList</code> instance.
+   */
+  exports.constructFromObject = function (data, obj) {
+    if (data) {
+      obj = data || new exports();
+
+      if (data.hasOwnProperty('pagination')) {
+        obj['pagination'] = Pagination.constructFromObject(data['pagination']);
+      }
+    }
+    return obj;
+  };
+
+  /**
+   * @member {module:model/Pagination} pagination
+   */
+  exports.prototype['pagination'] = undefined;
+
+  return exports;
+});
+
+},{"../../../alfrescoApiClient":330,"./Pagination":299}],323:[function(require,module,exports){
+'use strict';
+
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
+
+(function (root, factory) {
+  if (typeof define === 'function' && define.amd) {
+    // AMD. Register as an anonymous module.
+    define(['../../../alfrescoApiClient'], factory);
+  } else if ((typeof module === 'undefined' ? 'undefined' : _typeof(module)) === 'object' && module.exports) {
+    // CommonJS-like environments that support module.exports, like Node.
+    module.exports = factory(require('../../../alfrescoApiClient'));
+  } else {
+    // Browser globals (root is window)
+    if (!root.AlfrescoWorkflowRestApi) {
+      root.AlfrescoWorkflowRestApi = {};
+    }
+    root.AlfrescoWorkflowRestApi.Variable = factory(root.AlfrescoWorkflowRestApi.ApiClient);
+  }
+})(undefined, function (ApiClient) {
+  'use strict';
+
+  /**
+   * The Variable model module.
+   * @module model/Variable
+   * @version 0.1.0
+   */
+
+  /**
+   * Constructs a new <code>Variable</code>.
+   * @alias module:model/Variable
+   * @class
+   */
+
+  var exports = function exports() {};
+
+  /**
+   * Constructs a <code>Variable</code> from a plain JavaScript object, optionally creating a new instance.
+   * Copies all relevant properties from <code>data</code> to <code>obj</code> if supplied or a new instance if not.
+   * @param {Object} data The plain JavaScript object bearing properties of interest.
+   * @param {module:model/Variable} obj Optional instance to populate.
+   * @return {module:model/Variable} The populated <code>Variable</code> instance.
+   */
+  exports.constructFromObject = function (data, obj) {
+    if (data) {
+      obj = data || new exports();
+
+      if (data.hasOwnProperty('scope')) {
+        obj['scope'] = ApiClient.convertToType(data['scope'], 'String');
+      }
+      if (data.hasOwnProperty('name')) {
+        obj['name'] = ApiClient.convertToType(data['name'], 'String');
+      }
+      if (data.hasOwnProperty('value')) {
+        obj['value'] = ApiClient.convertToType(data['value'], 'String');
+      }
+      if (data.hasOwnProperty('type')) {
+        obj['type'] = ApiClient.convertToType(data['type'], 'String');
+      }
+    }
+    return obj;
+  };
+
+  /**
+   * @member {String} scope
+   */
+  exports.prototype['scope'] = undefined;
+
+  /**
+   * @member {String} name
+   */
+  exports.prototype['name'] = undefined;
+
+  /**
+   * @member {String} value
+   */
+  exports.prototype['value'] = undefined;
+
+  /**
+   * @member {String} type
+   */
+  exports.prototype['type'] = undefined;
+
+  return exports;
+});
+
+},{"../../../alfrescoApiClient":330}],324:[function(require,module,exports){
+'use strict';
+
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
+
+(function (root, factory) {
+  if (typeof define === 'function' && define.amd) {
+    // AMD. Register as an anonymous module.
+    define(['../../../alfrescoApiClient'], factory);
+  } else if ((typeof module === 'undefined' ? 'undefined' : _typeof(module)) === 'object' && module.exports) {
+    // CommonJS-like environments that support module.exports, like Node.
+    module.exports = factory(require('../../../alfrescoApiClient'));
+  } else {
+    // Browser globals (root is window)
+    if (!root.AlfrescoWorkflowRestApi) {
+      root.AlfrescoWorkflowRestApi = {};
+    }
+    root.AlfrescoWorkflowRestApi.Variable = factory(root.AlfrescoWorkflowRestApi.ApiClient);
+  }
+})(undefined, function (ApiClient) {
+  'use strict';
+
+  /**
+   * The Variable model module.
+   * @module model/Variable
+   * @version 0.1.0
+   */
+
+  /**
+   * Constructs a new <code>Variable</code>.
+   * @alias module:model/Variable
+   * @class
+   */
+
+  var exports = function exports() {};
+
+  /**
+   * Constructs a <code>Variable</code> from a plain JavaScript object, optionally creating a new instance.
+   * Copies all relevant properties from <code>data</code> to <code>obj</code> if supplied or a new instance if not.
+   * @param {Object} data The plain JavaScript object bearing properties of interest.
+   * @param {module:model/Variable} obj Optional instance to populate.
+   * @return {module:model/Variable} The populated <code>Variable</code> instance.
+   */
+  exports.constructFromObject = function (data, obj) {
+    if (data) {
+      obj = data || new exports();
+
+      if (data.hasOwnProperty('bpm_assignee')) {
+        obj['bpm_assignee'] = ApiClient.convertToType(data['bpm_assignee'], 'String');
+      }
+      if (data.hasOwnProperty('bpm_sendEmailNotifications')) {
+        obj['bpm_sendEmailNotifications'] = ApiClient.convertToType(data['bpm_sendEmailNotifications'], 'String');
+      }
+      if (data.hasOwnProperty('bpm_workflowPriority')) {
+        obj['bpm_workflowPriority'] = ApiClient.convertToType(data['bpm_workflowPriority'], 'String');
+      }
+    }
+    return obj;
+  };
+
+  /**
+   * @member {String} bpm_assignee
+   */
+  exports.prototype['bpm_assignee'] = undefined;
+
+  /**
+   * @member {String} bpm_sendEmailNotifications
+   */
+  exports.prototype['bpm_sendEmailNotifications'] = undefined;
+
+  /**
+   * @member {String} bpm_workflowPriority
+   */
+  exports.prototype['bpm_workflowPriority'] = undefined;
+
+  return exports;
+});
+
+},{"../../../alfrescoApiClient":330}],325:[function(require,module,exports){
+'use strict';
+
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
+
+(function (root, factory) {
+  if (typeof define === 'function' && define.amd) {
+    // AMD. Register as an anonymous module.
+    define(['../../../alfrescoApiClient'], factory);
+  } else if ((typeof module === 'undefined' ? 'undefined' : _typeof(module)) === 'object' && module.exports) {
+    // CommonJS-like environments that support module.exports, like Node.
+    module.exports = factory(require('../../../alfrescoApiClient'));
+  } else {
+    // Browser globals (root is window)
+    if (!root.AlfrescoWorkflowRestApi) {
+      root.AlfrescoWorkflowRestApi = {};
+    }
+    root.AlfrescoWorkflowRestApi.VariableBody = factory(root.AlfrescoWorkflowRestApi.ApiClient);
+  }
+})(undefined, function (ApiClient) {
+  'use strict';
+
+  /**
+   * The VariableBody model module.
+   * @module model/VariableBody
+   * @version 0.1.0
+   */
+
+  /**
+   * Constructs a new <code>VariableBody</code>.
+   * @alias module:model/VariableBody
+   * @class
+   * @param name
+   * @param value
+   * @param type
+   */
+
+  var exports = function exports(name, value, type) {
+
+    this['name'] = name;
+    this['value'] = value;
+    this['type'] = type;
+  };
+
+  /**
+   * Constructs a <code>VariableBody</code> from a plain JavaScript object, optionally creating a new instance.
+   * Copies all relevant properties from <code>data</code> to <code>obj</code> if supplied or a new instance if not.
+   * @param {Object} data The plain JavaScript object bearing properties of interest.
+   * @param {module:model/VariableBody} obj Optional instance to populate.
+   * @return {module:model/VariableBody} The populated <code>VariableBody</code> instance.
+   */
+  exports.constructFromObject = function (data, obj) {
+    if (data) {
+      obj = data || new exports();
+
+      if (data.hasOwnProperty('name')) {
+        obj['name'] = ApiClient.convertToType(data['name'], 'String');
+      }
+      if (data.hasOwnProperty('value')) {
+        obj['value'] = ApiClient.convertToType(data['value'], 'String');
+      }
+      if (data.hasOwnProperty('type')) {
+        obj['type'] = ApiClient.convertToType(data['type'], 'String');
+      }
+    }
+    return obj;
+  };
+
+  /**
+   * @member {String} name
+   */
+  exports.prototype['name'] = undefined;
+
+  /**
+   * @member {String} value
+   */
+  exports.prototype['value'] = undefined;
+
+  /**
+   * @member {String} type
+   */
+  exports.prototype['type'] = undefined;
+
+  return exports;
+});
+
+},{"../../../alfrescoApiClient":330}],326:[function(require,module,exports){
+'use strict';
+
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
+
+(function (root, factory) {
+  if (typeof define === 'function' && define.amd) {
+    // AMD. Register as an anonymous module.
+    define(['../../../alfrescoApiClient', './Variable'], factory);
+  } else if ((typeof module === 'undefined' ? 'undefined' : _typeof(module)) === 'object' && module.exports) {
+    // CommonJS-like environments that support module.exports, like Node.
+    module.exports = factory(require('../../../alfrescoApiClient'), require('./Variable'));
+  } else {
+    // Browser globals (root is window)
+    if (!root.AlfrescoWorkflowRestApi) {
+      root.AlfrescoWorkflowRestApi = {};
+    }
+    root.AlfrescoWorkflowRestApi.VariableEntry = factory(root.AlfrescoWorkflowRestApi.ApiClient, root.AlfrescoWorkflowRestApi.Variable);
+  }
+})(undefined, function (ApiClient, Variable) {
+  'use strict';
+
+  /**
+   * The VariableEntry model module.
+   * @module model/VariableEntry
+   * @version 0.1.0
+   */
+
+  /**
+   * Constructs a new <code>VariableEntry</code>.
+   * @alias module:model/VariableEntry
+   * @class
+   * @param entry
+   */
+
+  var exports = function exports(entry) {
+
+    this['entry'] = entry;
+  };
+
+  /**
+   * Constructs a <code>VariableEntry</code> from a plain JavaScript object, optionally creating a new instance.
+   * Copies all relevant properties from <code>data</code> to <code>obj</code> if supplied or a new instance if not.
+   * @param {Object} data The plain JavaScript object bearing properties of interest.
+   * @param {module:model/VariableEntry} obj Optional instance to populate.
+   * @return {module:model/VariableEntry} The populated <code>VariableEntry</code> instance.
+   */
+  exports.constructFromObject = function (data, obj) {
+    if (data) {
+      obj = data || new exports();
+
+      if (data.hasOwnProperty('entry')) {
+        obj['entry'] = Variable.constructFromObject(data['entry']);
+      }
+    }
+    return obj;
+  };
+
+  /**
+   * @member {module:model/Variable} entry
+   */
+  exports.prototype['entry'] = undefined;
+
+  return exports;
+});
+
+},{"../../../alfrescoApiClient":330,"./Variable":323}],327:[function(require,module,exports){
+'use strict';
+
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
+
+(function (root, factory) {
+  if (typeof define === 'function' && define.amd) {
+    // AMD. Register as an anonymous module.
+    define(['../../../alfrescoApiClient', './VariablePagingList'], factory);
+  } else if ((typeof module === 'undefined' ? 'undefined' : _typeof(module)) === 'object' && module.exports) {
+    // CommonJS-like environments that support module.exports, like Node.
+    module.exports = factory(require('../../../alfrescoApiClient'), require('./VariablePagingList'));
+  } else {
+    // Browser globals (root is window)
+    if (!root.AlfrescoWorkflowRestApi) {
+      root.AlfrescoWorkflowRestApi = {};
+    }
+    root.AlfrescoWorkflowRestApi.VariablePaging = factory(root.AlfrescoWorkflowRestApi.ApiClient, root.AlfrescoWorkflowRestApi.VariablePagingList);
+  }
+})(undefined, function (ApiClient, VariablePagingList) {
+  'use strict';
+
+  /**
+   * The VariablePaging model module.
+   * @module model/VariablePaging
+   * @version 0.1.0
+   */
+
+  /**
+   * Constructs a new <code>VariablePaging</code>.
+   * @alias module:model/VariablePaging
+   * @class
+   */
+
+  var exports = function exports() {};
+
+  /**
+   * Constructs a <code>VariablePaging</code> from a plain JavaScript object, optionally creating a new instance.
+   * Copies all relevant properties from <code>data</code> to <code>obj</code> if supplied or a new instance if not.
+   * @param {Object} data The plain JavaScript object bearing properties of interest.
+   * @param {module:model/VariablePaging} obj Optional instance to populate.
+   * @return {module:model/VariablePaging} The populated <code>VariablePaging</code> instance.
+   */
+  exports.constructFromObject = function (data, obj) {
+    if (data) {
+      obj = data || new exports();
+
+      if (data.hasOwnProperty('list')) {
+        obj['list'] = VariablePagingList.constructFromObject(data['list']);
+      }
+    }
+    return obj;
+  };
+
+  /**
+   * @member {module:model/VariablePagingList} list
+   */
+  exports.prototype['list'] = undefined;
+
+  return exports;
+});
+
+},{"../../../alfrescoApiClient":330,"./VariablePagingList":328}],328:[function(require,module,exports){
+'use strict';
+
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
+
+(function (root, factory) {
+  if (typeof define === 'function' && define.amd) {
+    // AMD. Register as an anonymous module.
+    define(['../../../alfrescoApiClient', './Pagination'], factory);
+  } else if ((typeof module === 'undefined' ? 'undefined' : _typeof(module)) === 'object' && module.exports) {
+    // CommonJS-like environments that support module.exports, like Node.
+    module.exports = factory(require('../../../alfrescoApiClient'), require('./Pagination'));
+  } else {
+    // Browser globals (root is window)
+    if (!root.AlfrescoWorkflowRestApi) {
+      root.AlfrescoWorkflowRestApi = {};
+    }
+    root.AlfrescoWorkflowRestApi.VariablePagingList = factory(root.AlfrescoWorkflowRestApi.ApiClient, root.AlfrescoWorkflowRestApi.Pagination);
+  }
+})(undefined, function (ApiClient, Pagination) {
+  'use strict';
+
+  /**
+   * The VariablePagingList model module.
+   * @module model/VariablePagingList
+   * @version 0.1.0
+   */
+
+  /**
+   * Constructs a new <code>VariablePagingList</code>.
+   * @alias module:model/VariablePagingList
+   * @class
+   * @param pagination
+   */
+
+  var exports = function exports(pagination) {
+
+    this['pagination'] = pagination;
+  };
+
+  /**
+   * Constructs a <code>VariablePagingList</code> from a plain JavaScript object, optionally creating a new instance.
+   * Copies all relevant properties from <code>data</code> to <code>obj</code> if supplied or a new instance if not.
+   * @param {Object} data The plain JavaScript object bearing properties of interest.
+   * @param {module:model/VariablePagingList} obj Optional instance to populate.
+   * @return {module:model/VariablePagingList} The populated <code>VariablePagingList</code> instance.
+   */
+  exports.constructFromObject = function (data, obj) {
+    if (data) {
+      obj = data || new exports();
+
+      if (data.hasOwnProperty('pagination')) {
+        obj['pagination'] = Pagination.constructFromObject(data['pagination']);
+      }
+    }
+    return obj;
+  };
+
+  /**
+   * @member {module:model/Pagination} pagination
+   */
+  exports.prototype['pagination'] = undefined;
+
+  return exports;
+});
+
+},{"../../../alfrescoApiClient":330,"./Pagination":299}],329:[function(require,module,exports){
+'use strict';
+
 var _createClass = function () { function defineProperties(target, props) { for (var i = 0; i < props.length; i++) { var descriptor = props[i]; descriptor.enumerable = descriptor.enumerable || false; descriptor.configurable = true; if ("value" in descriptor) descriptor.writable = true; Object.defineProperty(target, descriptor.key, descriptor); } } return function (Constructor, protoProps, staticProps) { if (protoProps) defineProperties(Constructor.prototype, protoProps); if (staticProps) defineProperties(Constructor, staticProps); return Constructor; }; }();
 
 function _classCallCheck(instance, Constructor) { if (!(instance instanceof Constructor)) { throw new TypeError("Cannot call a class as a function"); } }
 
 var AlfrescoCoreRestApi = require('./alfresco-core-rest-api/src/index.js');
+var AlfrescoWorkflowRestApi = require('./alfresco-workflow-rest-api/src/index.js');
 var AlfrescoAuthRestApi = require('./alfresco-auth-rest-api/src/index');
 var AlfrescoActivitiApi = require('./alfresco-activiti-rest-api/src/index');
 var AlfrescoContent = require('./alfrescoContent');
@@ -55582,6 +60993,7 @@ var AlfrescoUpload = require('./alfrescoUpload');
 var AlfrescoWebScriptApi = require('./alfrescoWebScript');
 var Emitter = require('event-emitter');
 var EcmAuth = require('./ecmAuth');
+var EcmWorkflowAuth = require('./ecmWorkflowAuth');
 var BpmAuth = require('./bpmAuth');
 var _ = require('lodash');
 
@@ -55618,6 +61030,7 @@ var AlfrescoApi = function () {
 
         this.bpmAuth = new BpmAuth(this.config);
         this.ecmAuth = new EcmAuth(this.config);
+        this.ecmWorkflowAuth = new EcmWorkflowAuth(this.config);
 
         this.initObjects();
 
@@ -55635,6 +61048,7 @@ var AlfrescoApi = function () {
         value: function changeEcmHost(hostEcm) {
             this.config.hostEcm = hostEcm;
             this.ecmAuth.changeHost(hostEcm);
+            this.ecmWorkflowAuth.changeHost(hostEcm);
         }
     }, {
         key: 'changeBpmHost',
@@ -55656,6 +61070,12 @@ var AlfrescoApi = function () {
             this.core = {};
             this.coreStore = AlfrescoCoreRestApi;
             this._instantiateObjects(this.coreStore, this.core);
+
+            //ECM Activiti
+            AlfrescoWorkflowRestApi.ApiClient.instance = this.ecmWorkflowAuth.getClient();
+            this.workflow = {};
+            this.workflowStore = AlfrescoWorkflowRestApi;
+            this._instantiateObjects(this.workflowStore, this.workflow);
 
             this.nodes = this.node = new AlfrescoNode();
             this.content = new AlfrescoContent(this.ecmAuth);
@@ -55927,9 +61347,10 @@ module.exports = AlfrescoApi;
 
 module.exports.Activiti = AlfrescoActivitiApi;
 module.exports.Core = AlfrescoCoreRestApi;
+module.exports.Workflow = AlfrescoWorkflowRestApi;
 module.exports.Auth = AlfrescoAuthRestApi;
 
-},{"./alfresco-activiti-rest-api/src/index":69,"./alfresco-auth-rest-api/src/index":153,"./alfresco-core-rest-api/src/index.js":176,"./alfrescoContent":288,"./alfrescoNode":289,"./alfrescoUpload":290,"./alfrescoWebScript":291,"./bpmAuth":292,"./ecmAuth":293,"event-emitter":21,"lodash":23}],287:[function(require,module,exports){
+},{"./alfresco-activiti-rest-api/src/index":69,"./alfresco-auth-rest-api/src/index":153,"./alfresco-core-rest-api/src/index.js":176,"./alfresco-workflow-rest-api/src/index.js":290,"./alfrescoContent":331,"./alfrescoNode":332,"./alfrescoUpload":333,"./alfrescoWebScript":334,"./bpmAuth":335,"./ecmAuth":336,"./ecmWorkflowAuth":337,"event-emitter":21,"lodash":23}],330:[function(require,module,exports){
 'use strict';
 
 var _createClass = function () { function defineProperties(target, props) { for (var i = 0; i < props.length; i++) { var descriptor = props[i]; descriptor.enumerable = descriptor.enumerable || false; descriptor.configurable = true; if ("value" in descriptor) descriptor.writable = true; Object.defineProperty(target, descriptor.key, descriptor); } } return function (Constructor, protoProps, staticProps) { if (protoProps) defineProperties(Constructor.prototype, protoProps); if (staticProps) defineProperties(Constructor, staticProps); return Constructor; }; }();
@@ -55954,7 +61375,7 @@ var AlfrescoApiClient = function (_ApiClient) {
     function AlfrescoApiClient(host) {
         _classCallCheck(this, AlfrescoApiClient);
 
-        var _this2 = _possibleConstructorReturn(this, Object.getPrototypeOf(AlfrescoApiClient).call(this));
+        var _this2 = _possibleConstructorReturn(this, (AlfrescoApiClient.__proto__ || Object.getPrototypeOf(AlfrescoApiClient)).call(this));
 
         _this2.host = host;
         Emitter.call(_this2);
@@ -56207,7 +61628,7 @@ var AlfrescoApiClient = function (_ApiClient) {
 Emitter(AlfrescoApiClient.prototype); // jshint ignore:line
 module.exports = AlfrescoApiClient;
 
-},{"./alfresco-core-rest-api/src/ApiClient":161,"event-emitter":21,"lodash":23,"superagent":25}],288:[function(require,module,exports){
+},{"./alfresco-core-rest-api/src/ApiClient":161,"event-emitter":21,"lodash":23,"superagent":25}],331:[function(require,module,exports){
 'use strict';
 
 var _createClass = function () { function defineProperties(target, props) { for (var i = 0; i < props.length; i++) { var descriptor = props[i]; descriptor.enumerable = descriptor.enumerable || false; descriptor.configurable = true; if ("value" in descriptor) descriptor.writable = true; Object.defineProperty(target, descriptor.key, descriptor); } } return function (Constructor, protoProps, staticProps) { if (protoProps) defineProperties(Constructor.prototype, protoProps); if (staticProps) defineProperties(Constructor, staticProps); return Constructor; }; }();
@@ -56273,7 +61694,7 @@ var AlfrescoContent = function () {
 
 module.exports = AlfrescoContent;
 
-},{}],289:[function(require,module,exports){
+},{}],332:[function(require,module,exports){
 'use strict';
 
 var _createClass = function () { function defineProperties(target, props) { for (var i = 0; i < props.length; i++) { var descriptor = props[i]; descriptor.enumerable = descriptor.enumerable || false; descriptor.configurable = true; if ("value" in descriptor) descriptor.writable = true; Object.defineProperty(target, descriptor.key, descriptor); } } return function (Constructor, protoProps, staticProps) { if (protoProps) defineProperties(Constructor.prototype, protoProps); if (staticProps) defineProperties(Constructor, staticProps); return Constructor; }; }();
@@ -56293,7 +61714,7 @@ var AlfrescoNode = function (_AlfrescoCoreRestApi$) {
     function AlfrescoNode() {
         _classCallCheck(this, AlfrescoNode);
 
-        return _possibleConstructorReturn(this, Object.getPrototypeOf(AlfrescoNode).apply(this, arguments));
+        return _possibleConstructorReturn(this, (AlfrescoNode.__proto__ || Object.getPrototypeOf(AlfrescoNode)).apply(this, arguments));
     }
 
     _createClass(AlfrescoNode, [{
@@ -56386,7 +61807,7 @@ var AlfrescoNode = function (_AlfrescoCoreRestApi$) {
 
 module.exports = AlfrescoNode;
 
-},{"./alfresco-core-rest-api/src/index.js":176,"lodash":23}],290:[function(require,module,exports){
+},{"./alfresco-core-rest-api/src/index.js":176,"lodash":23}],333:[function(require,module,exports){
 'use strict';
 
 var _createClass = function () { function defineProperties(target, props) { for (var i = 0; i < props.length; i++) { var descriptor = props[i]; descriptor.enumerable = descriptor.enumerable || false; descriptor.configurable = true; if ("value" in descriptor) descriptor.writable = true; Object.defineProperty(target, descriptor.key, descriptor); } } return function (Constructor, protoProps, staticProps) { if (protoProps) defineProperties(Constructor.prototype, protoProps); if (staticProps) defineProperties(Constructor, staticProps); return Constructor; }; }();
@@ -56407,7 +61828,7 @@ var AlfrescoUpload = function (_AlfrescoCoreRestApi$) {
     function AlfrescoUpload() {
         _classCallCheck(this, AlfrescoUpload);
 
-        var _this = _possibleConstructorReturn(this, Object.getPrototypeOf(AlfrescoUpload).call(this));
+        var _this = _possibleConstructorReturn(this, (AlfrescoUpload.__proto__ || Object.getPrototypeOf(AlfrescoUpload)).call(this));
 
         Emitter.call(_this);
         return _this;
@@ -56484,7 +61905,7 @@ var AlfrescoUpload = function (_AlfrescoCoreRestApi$) {
 Emitter(AlfrescoUpload.prototype); // jshint ignore:line
 module.exports = AlfrescoUpload;
 
-},{"./alfresco-core-rest-api/src/index.js":176,"event-emitter":21,"lodash":23}],291:[function(require,module,exports){
+},{"./alfresco-core-rest-api/src/index.js":176,"event-emitter":21,"lodash":23}],334:[function(require,module,exports){
 'use strict';
 
 var _createClass = function () { function defineProperties(target, props) { for (var i = 0; i < props.length; i++) { var descriptor = props[i]; descriptor.enumerable = descriptor.enumerable || false; descriptor.configurable = true; if ("value" in descriptor) descriptor.writable = true; Object.defineProperty(target, descriptor.key, descriptor); } } return function (Constructor, protoProps, staticProps) { if (protoProps) defineProperties(Constructor.prototype, protoProps); if (staticProps) defineProperties(Constructor, staticProps); return Constructor; }; }();
@@ -56548,7 +61969,7 @@ var AlfrescoWebScriptApi = function () {
 
 module.exports = AlfrescoWebScriptApi;
 
-},{"./alfresco-core-rest-api/src/ApiClient":161}],292:[function(require,module,exports){
+},{"./alfresco-core-rest-api/src/ApiClient":161}],335:[function(require,module,exports){
 (function (Buffer){
 'use strict';
 
@@ -56572,7 +61993,7 @@ var BpmAuth = function (_AlfrescoApiClient) {
     function BpmAuth(config) {
         _classCallCheck(this, BpmAuth);
 
-        var _this = _possibleConstructorReturn(this, Object.getPrototypeOf(BpmAuth).call(this));
+        var _this = _possibleConstructorReturn(this, (BpmAuth.__proto__ || Object.getPrototypeOf(BpmAuth)).call(this));
 
         _this.config = config;
         _this.ticket = undefined;
@@ -56753,7 +62174,7 @@ Emitter(BpmAuth.prototype); // jshint ignore:line
 module.exports = BpmAuth;
 
 }).call(this,require("buffer").Buffer)
-},{"./alfrescoApiClient":287,"buffer":4,"event-emitter":21}],293:[function(require,module,exports){
+},{"./alfrescoApiClient":330,"buffer":4,"event-emitter":21}],336:[function(require,module,exports){
 'use strict';
 
 var _createClass = function () { function defineProperties(target, props) { for (var i = 0; i < props.length; i++) { var descriptor = props[i]; descriptor.enumerable = descriptor.enumerable || false; descriptor.configurable = true; if ("value" in descriptor) descriptor.writable = true; Object.defineProperty(target, descriptor.key, descriptor); } } return function (Constructor, protoProps, staticProps) { if (protoProps) defineProperties(Constructor.prototype, protoProps); if (staticProps) defineProperties(Constructor, staticProps); return Constructor; }; }();
@@ -56777,7 +62198,7 @@ var EcmAuth = function (_AlfrescoApiClient) {
     function EcmAuth(config) {
         _classCallCheck(this, EcmAuth);
 
-        var _this = _possibleConstructorReturn(this, Object.getPrototypeOf(EcmAuth).call(this));
+        var _this = _possibleConstructorReturn(this, (EcmAuth.__proto__ || Object.getPrototypeOf(EcmAuth)).call(this));
 
         _this.config = config;
 
@@ -56971,5 +62392,68 @@ var EcmAuth = function (_AlfrescoApiClient) {
 Emitter(EcmAuth.prototype); // jshint ignore:line
 module.exports = EcmAuth;
 
-},{"./alfresco-auth-rest-api/src/index":153,"./alfrescoApiClient":287,"event-emitter":21}]},{},[1])(1)
+},{"./alfresco-auth-rest-api/src/index":153,"./alfrescoApiClient":330,"event-emitter":21}],337:[function(require,module,exports){
+'use strict';
+
+var _createClass = function () { function defineProperties(target, props) { for (var i = 0; i < props.length; i++) { var descriptor = props[i]; descriptor.enumerable = descriptor.enumerable || false; descriptor.configurable = true; if ("value" in descriptor) descriptor.writable = true; Object.defineProperty(target, descriptor.key, descriptor); } } return function (Constructor, protoProps, staticProps) { if (protoProps) defineProperties(Constructor.prototype, protoProps); if (staticProps) defineProperties(Constructor, staticProps); return Constructor; }; }();
+
+function _classCallCheck(instance, Constructor) { if (!(instance instanceof Constructor)) { throw new TypeError("Cannot call a class as a function"); } }
+
+function _possibleConstructorReturn(self, call) { if (!self) { throw new ReferenceError("this hasn't been initialised - super() hasn't been called"); } return call && (typeof call === "object" || typeof call === "function") ? call : self; }
+
+function _inherits(subClass, superClass) { if (typeof superClass !== "function" && superClass !== null) { throw new TypeError("Super expression must either be null or a function, not " + typeof superClass); } subClass.prototype = Object.create(superClass && superClass.prototype, { constructor: { value: subClass, enumerable: false, writable: true, configurable: true } }); if (superClass) Object.setPrototypeOf ? Object.setPrototypeOf(subClass, superClass) : subClass.__proto__ = superClass; }
+
+var EcmAuth = require('./ecmAuth');
+var Emitter = require('event-emitter');
+
+var EcmWorkflowAuth = function (_EcmAuth) {
+    _inherits(EcmWorkflowAuth, _EcmAuth);
+
+    /**
+     * @param {Object} config
+     */
+    function EcmWorkflowAuth(config) {
+        _classCallCheck(this, EcmWorkflowAuth);
+
+        return _possibleConstructorReturn(this, (EcmWorkflowAuth.__proto__ || Object.getPrototypeOf(EcmWorkflowAuth)).call(this, config));
+    }
+
+    _createClass(EcmWorkflowAuth, [{
+        key: 'changeHost',
+        value: function changeHost(host) {
+            this.config.hostEcm = host;
+
+            this.basePath = this.config.hostEcm + '/' + this.config.contextRoot + '/api/-default-/public/authentication/versions/1'; //Auth Call
+
+            if (this.alfrescoClient) {
+                this.alfrescoClient.basePath = this.config.hostEcm + '/' + this.config.contextRoot + '/api/-default-/public/workflow/versions/1'; //Auth Call
+            }
+        }
+
+        /**
+         * return an Alfresco API Client
+         *
+         * @returns {ApiClient} Alfresco API Client
+         * */
+
+    }, {
+        key: 'getClient',
+        value: function getClient() {
+            if (!this.alfrescoClient) {
+                this.alfrescoClient = new EcmAuth(this.config.hostEcm);
+            }
+
+            this.alfrescoClient.basePath = this.config.hostEcm + '/' + this.config.contextRoot + '/api/-default-/public/workflow/versions/1'; //Auth Call
+            this.alfrescoClient.authentications = this.authentications;
+            return this.alfrescoClient;
+        }
+    }]);
+
+    return EcmWorkflowAuth;
+}(EcmAuth);
+
+Emitter(EcmWorkflowAuth.prototype); // jshint ignore:line
+module.exports = EcmWorkflowAuth;
+
+},{"./ecmAuth":336,"event-emitter":21}]},{},[1])(1)
 });

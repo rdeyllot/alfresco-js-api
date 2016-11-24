@@ -1,6 +1,7 @@
 'use strict';
 
 var AlfrescoCoreRestApi = require('./alfresco-core-rest-api/src/index.js');
+var AlfrescoWorkflowRestApi = require('./alfresco-workflow-rest-api/src/index.js');
 var AlfrescoAuthRestApi = require('./alfresco-auth-rest-api/src/index');
 var AlfrescoActivitiApi = require('./alfresco-activiti-rest-api/src/index');
 var AlfrescoContent = require('./alfrescoContent');
@@ -9,6 +10,7 @@ var AlfrescoUpload = require('./alfrescoUpload');
 var AlfrescoWebScriptApi = require('./alfrescoWebScript');
 var Emitter = require('event-emitter');
 var EcmAuth = require('./ecmAuth');
+var EcmWorkflowAuth = require('./ecmWorkflowAuth');
 var BpmAuth = require('./bpmAuth');
 var _ = require('lodash');
 
@@ -44,6 +46,7 @@ class AlfrescoApi {
 
         this.bpmAuth = new BpmAuth(this.config);
         this.ecmAuth = new EcmAuth(this.config);
+        this.ecmWorkflowAuth = new EcmWorkflowAuth(this.config);
 
         this.initObjects();
 
@@ -58,6 +61,7 @@ class AlfrescoApi {
     changeEcmHost(hostEcm) {
         this.config.hostEcm = hostEcm;
         this.ecmAuth.changeHost(hostEcm);
+        this.ecmWorkflowAuth.changeHost(hostEcm);
     }
 
     changeBpmHost(hostBpm) {
@@ -77,6 +81,12 @@ class AlfrescoApi {
         this.core = {};
         this.coreStore = AlfrescoCoreRestApi;
         this._instantiateObjects(this.coreStore, this.core);
+
+        //ECM Activiti
+        AlfrescoWorkflowRestApi.ApiClient.instance = this.ecmWorkflowAuth.getClient();
+        this.workflow = {};
+        this.workflowStore = AlfrescoWorkflowRestApi;
+        this._instantiateObjects(this.workflowStore, this.workflow);
 
         this.nodes = this.node = new AlfrescoNode();
         this.content = new AlfrescoContent(this.ecmAuth);
@@ -307,4 +317,5 @@ module.exports = AlfrescoApi;
 
 module.exports.Activiti = AlfrescoActivitiApi;
 module.exports.Core = AlfrescoCoreRestApi;
+module.exports.Workflow = AlfrescoWorkflowRestApi;
 module.exports.Auth = AlfrescoAuthRestApi;
